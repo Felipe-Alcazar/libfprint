@@ -43,8 +43,8 @@ static const FpIdEntry id_table[] = {
   { .vid = 0,      .pid = 0,      .driver_data = 0 },
 };
 
-/* Map a USB "no device" error — the sensor dropped off the bus after one of its
- * intermittent re-enumerations — to FP_DEVICE_ERROR_REMOVED, so fprintd treats
+/* Map a USB "no device" error -- the sensor dropped off the bus after one of its
+ * intermittent re-enumerations -- to FP_DEVICE_ERROR_REMOVED, so fprintd treats
  * it as a device removal (re-detecting the re-enumerated device and retrying)
  * rather than a generic protocol failure. Takes ownership of @error and returns
  * the (possibly replaced) error. */
@@ -54,7 +54,7 @@ validity_map_removed_error (GError *error)
   if (error &&
       g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_NO_DEVICE))
     {
-      fp_info ("Device dropped off the bus (re-enumeration) — reporting as removed");
+      fp_info ("Device dropped off the bus (re-enumeration) -- reporting as removed");
       g_error_free (error);
       return fpi_device_error_new (FP_DEVICE_ERROR_REMOVED);
     }

@@ -56,7 +56,7 @@ typedef enum {
   VALIDITY_DEV_9D,      /* 138a:009d */
   VALIDITY_DEV_AB,      /* 138a:00ab (HP ZBook Studio x360 G5) */
   VALIDITY_DEV_CB,      /* 06cb:00cb (HP Pavilion x360 14-dh) */
-  VALIDITY_DEV_B7,      /* 06cb:00b7 (HP G6 series) — UNTESTED, from python-validity */
+  VALIDITY_DEV_B7,      /* 06cb:00b7 (HP G6 series) -- UNTESTED, from python-validity */
 } ValidityDeviceType;
 
 /* Firmware version info from GET_VERSION (cmd 0x01) */
@@ -276,15 +276,15 @@ struct _FpiDeviceValidity
   guint    calib_iteration;
 
   /* Enrollment state */
-  guint32 enroll_key;
-  guint8 *enroll_template;
-  gsize   enroll_template_len;
-  guint   enroll_stage;
-  guint16 enroll_user_dbid;
-  guint16 enroll_storage_dbid;
-  guint   scan_incomplete_count;
-  gboolean enroll_frame_rejected;   /* sensor rejected the last frame (0x0526) — retry stage */
-  guint   enroll_reject_retries;    /* cumulative 0x0526 retries — bounds broken-firmware loops */
+  guint32  enroll_key;
+  guint8  *enroll_template;
+  gsize    enroll_template_len;
+  guint    enroll_stage;
+  guint16  enroll_user_dbid;
+  guint16  enroll_storage_dbid;
+  guint    scan_incomplete_count;
+  gboolean enroll_frame_rejected;   /* sensor rejected the last frame (0x0526) -- retry stage */
+  guint    enroll_reject_retries;   /* cumulative 0x0526 retries -- bounds broken-firmware loops */
 
   /* Verify: retry state for empty/phantom captures (no finger down) */
   guint    verify_capture_retries;

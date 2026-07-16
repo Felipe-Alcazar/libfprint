@@ -598,7 +598,7 @@ validity_pair_build_tls_flash (const ValidityPairState *state,
   if (!ok)
     {
       /* A device-supplied block did not fit in the fixed flash image. */
-      fp_warn ("TLS flash image build overflowed — refusing to pair");
+      fp_warn ("TLS flash image build overflowed -- refusing to pair");
       g_free (buf);
       *out_len = 0;
       return NULL;

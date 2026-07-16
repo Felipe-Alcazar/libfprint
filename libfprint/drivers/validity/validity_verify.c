@@ -480,9 +480,9 @@ verify_run_state (FpiSsm   *ssm,
         if (self->cmd_response_data && self->cmd_response_len >= 16)
           {
             const guint8 *d = self->cmd_response_data;
-            guint16 x   = d[4]  | (d[5]  << 8);
-            guint16 y   = d[6]  | (d[7]  << 8);
-            guint16 w1  = d[8]  | (d[9]  << 8);
+            guint16 x   = d[4]  | (d[5] << 8);
+            guint16 y   = d[6]  | (d[7] << 8);
+            guint16 w1  = d[8]  | (d[9] << 8);
             guint16 w2  = d[10] | (d[11] << 8);
             guint32 err = d[12] | (d[13] << 8) | (d[14] << 16) | ((guint32) d[15] << 24);
             fp_dbg ("Verify capture status: x=%u y=%u w1=%u w2=%u error=0x%08x",
@@ -497,7 +497,7 @@ verify_run_state (FpiSsm   *ssm,
              * the operation's GCancellable (fprintd's timeout or a user
              * cancel) rather than a fixed driver-side timeout. */
             self->verify_recapture = TRUE;
-            fp_dbg ("Verify: empty capture (no finger yet) — re-arming (attempt %u)",
+            fp_dbg ("Verify: empty capture (no finger yet) -- re-arming (attempt %u)",
                     ++self->verify_capture_retries);
           }
         else
@@ -525,7 +525,9 @@ verify_run_state (FpiSsm   *ssm,
           fpi_ssm_jump_to_state_delayed (ssm, VERIFY_BUILD_CAPTURE, 300);
         }
       else
-        fpi_ssm_next_state (ssm);
+        {
+          fpi_ssm_next_state (ssm);
+        }
       break;
 
     case VERIFY_MATCH_START:
@@ -991,7 +993,7 @@ list_ssm_done (FpiSsm   *ssm,
     }
 
   /* The ssm still owns a reference via its g_ptr_array_unref destroy notify
-   * (set with fpi_ssm_set_data), so hand list_complete its own reference —
+   * (set with fpi_ssm_set_data), so hand list_complete its own reference --
    * otherwise the array is unreffed twice and freed while the caller still
    * iterates it (use-after-free). */
   fpi_device_list_complete (dev, g_ptr_array_ref (prints_array), NULL);

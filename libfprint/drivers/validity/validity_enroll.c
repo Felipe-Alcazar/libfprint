@@ -124,7 +124,7 @@ interrupt_cb (FpiUsbTransfer *transfer,
    * straight to type-3 capture events while we are still waiting for
    * finger-down. Accept the type-3 as the finger-down signal. Mirror
    * python-validity's saved_b: the same type-3 must also be tested for
-   * scan-complete, because a single type-3 can carry both — advancing to
+   * scan-complete, because a single type-3 can carry both -- advancing to
    * ENROLL_WAIT_SCAN_COMPLETE (which issues a fresh read) would lose it and
    * hang. */
   if (target_state == VALIDITY_INT_FINGER_DOWN && int_type == 3 &&
@@ -138,14 +138,14 @@ interrupt_cb (FpiUsbTransfer *transfer,
       if (transfer->actual_length >= 3 &&
           (transfer->buffer[2] & VALIDITY_INT_SCAN_COMPLETE))
         {
-          /* Finger-down and scan-complete arrived together — skip the
+          /* Finger-down and scan-complete arrived together -- skip the
            * separate scan-complete wait, which would block on a fresh read. */
           self->scan_incomplete_count = 0;
           fpi_ssm_jump_to_state (ssm, ENROLL_GET_PRG_STATUS);
         }
       else
         {
-          /* Finger down, scan still in progress — await the completing
+          /* Finger down, scan still in progress -- await the completing
            * type-3 in ENROLL_WAIT_SCAN_COMPLETE. */
           fpi_ssm_next_state (ssm);
         }
@@ -597,11 +597,11 @@ enroll_append_image_read_recv (FpiSsm            *ssm,
       /* Status 0x0526 = the sensor rejected this frame (typically a
        * near-duplicate from a finger that wasn't lifted between stages).
        * Not fatal: close the enrollment session (ENROLL_UPDATE_END) and let
-       * the loop re-capture this stage, reporting a retry to the user — this
+       * the loop re-capture this stage, reporting a retry to the user -- this
        * mirrors python-validity's enroll loop, which retries on any bad frame. */
       if (self->cmd_response_status == 0x0526)
         {
-          fp_info ("enrollment_update rejected the frame (0x0526) — retrying stage");
+          fp_info ("enrollment_update rejected the frame (0x0526) -- retrying stage");
           self->enroll_frame_rejected = TRUE;
           fpi_ssm_jump_to_state (ssm, ENROLL_UPDATE_END);
           return;
@@ -676,7 +676,7 @@ enroll_loop_check (FpiSsm            *ssm,
 
       if (++self->enroll_reject_retries > VALIDITY_ENROLL_MAX_REJECTS)
         {
-          fp_warn ("Enrollment rejected %u frames — aborting",
+          fp_warn ("Enrollment rejected %u frames -- aborting",
                    self->enroll_reject_retries);
           fpi_ssm_mark_failed (ssm,
                                fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
@@ -686,7 +686,7 @@ enroll_loop_check (FpiSsm            *ssm,
       fpi_device_enroll_progress (
         dev, self->enroll_stage, NULL,
         fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
-      fp_info ("Enrollment frame rejected — retrying stage %u", self->enroll_stage + 1);
+      fp_info ("Enrollment frame rejected -- retrying stage %u", self->enroll_stage + 1);
       fpi_ssm_jump_to_state (ssm, ENROLL_LED_ON);
       return;
     }
@@ -1028,17 +1028,19 @@ enroll_run_state (FpiSsm   *ssm,
       if (self->cmd_response_data && self->cmd_response_len >= 16)
         {
           const guint8 *d = self->cmd_response_data;
-          guint16 x  = d[4]  | (d[5]  << 8);
-          guint16 y  = d[6]  | (d[7]  << 8);
-          guint16 w1 = d[8]  | (d[9]  << 8);
+          guint16 x  = d[4]  | (d[5] << 8);
+          guint16 y  = d[6]  | (d[7] << 8);
+          guint16 w1 = d[8]  | (d[9] << 8);
           guint16 w2 = d[10] | (d[11] << 8);
           guint32 err = d[12] | (d[13] << 8) | (d[14] << 16) | ((guint32) d[15] << 24);
           fp_dbg ("Enroll capture (stage %u): x=%u y=%u w1=%u w2=%u error=0x%08x",
                   self->enroll_stage, x, y, w1, w2, err);
         }
       else
-        fp_dbg ("Enroll capture: short status response (len=%" G_GSIZE_FORMAT ")",
-                self->cmd_response_len);
+        {
+          fp_dbg ("Enroll capture: short status response (len=%" G_GSIZE_FORMAT ")",
+                  self->cmd_response_len);
+        }
       fpi_ssm_next_state (ssm);
       break;
 
