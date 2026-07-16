@@ -94,7 +94,8 @@ dev_probe (FpDevice *device)
 
   if (!g_usb_device_open (usb_dev, &error))
     {
-      fpi_device_probe_complete (device, NULL, NULL, error);
+      fpi_device_probe_complete (device, NULL, NULL,
+                                 validity_map_removed_error (error));
       return;
     }
 

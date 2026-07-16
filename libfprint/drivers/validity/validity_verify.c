@@ -1344,7 +1344,7 @@ clear_ssm_done (FpiSsm   *ssm,
   FpiDeviceValidity *self = FPI_DEVICE_VALIDITY (dev);
 
   validity_user_storage_clear (&self->list_storage);
-  fpi_device_clear_storage_complete (dev, error);
+  fpi_device_clear_storage_complete (dev, validity_map_removed_error (error));
 }
 
 void
