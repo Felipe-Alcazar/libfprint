@@ -27,6 +27,16 @@
 #include <glib/gstdio.h>
 #include <string.h>
 
+/*
+ * Data-source isolation: the per-device blobs and shared keys are loaded from
+ * external .bin files at runtime (search paths below), not compiled into the
+ * driver. Every consumer goes through validity_data_get_bytes(); the only
+ * file-specific code is validity_data_load_file() and the load loops. If
+ * libfprint gains a managed driver-data mechanism (see MR !368), only the
+ * loader changes -- swap g_file_get_contents() for the driver-data fetch and
+ * keep the store and accessor unchanged.
+ */
+
 /* Search paths for data files */
 const gchar *validity_data_search_paths[] = {
   "/usr/share/libfprint/validity",
