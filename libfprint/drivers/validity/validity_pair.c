@@ -519,26 +519,35 @@ validity_pair_build_partition_flash_cmd (const ValidityFlashIcParams *flash_ic,
 
 #define TLS_FLASH_IMAGE_SIZE 0x1000
 
-static gsize
-append_flash_block (guint8 *buf, gsize offset, guint16 id,
+/* Append one flash block (header + SHA-256 + body) at *offset, advancing it.
+ * Returns FALSE (writing nothing) if the block would not fit in buf_size or if
+ * body_len exceeds the 16-bit size field. body_len is device-controlled for
+ * some blocks (server cert, ECDH blob), so this bound is a hard requirement. */
+static gboolean
+append_flash_block (guint8 *buf, gsize buf_size, gsize *offset, guint16 id,
                     const guint8 *body, gsize body_len)
 {
+  if (body_len > G_MAXUINT16 ||
+      *offset > buf_size ||
+      body_len + 4 + 32 > buf_size - *offset)
+    return FALSE;
+
   /* Header: [id:2LE][size:2LE] */
-  validity_pack (buf + offset, 4, "hh", id, (guint16) body_len);
-  offset += 4;
+  validity_pack (buf + *offset, 4, "hh", id, (guint16) body_len);
+  *offset += 4;
 
   /* SHA-256 of body */
   g_autoptr(GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
   g_checksum_update (checksum, body, body_len);
   gsize hash_len = 32;
-  g_checksum_get_digest (checksum, buf + offset, &hash_len);
-  offset += 32;
+  g_checksum_get_digest (checksum, buf + *offset, &hash_len);
+  *offset += 32;
 
   /* Body */
-  memcpy (buf + offset, body, body_len);
-  offset += body_len;
+  memcpy (buf + *offset, body, body_len);
+  *offset += body_len;
 
-  return offset;
+  return TRUE;
 }
 
 guint8 *
@@ -557,37 +566,45 @@ validity_pair_build_tls_flash (const ValidityPairState *state,
   memset (empty_block, 0, sizeof (empty_block));
 
   gsize offset = 0;
+  gboolean ok = TRUE;
 
   /* Block 0: empty marker */
-  offset = append_flash_block (buf, offset, 0, &zero_byte, 1);
+  ok = ok && append_flash_block (buf, TLS_FLASH_IMAGE_SIZE, &offset, 0, &zero_byte, 1);
 
   /* Block 4: encrypted private key */
-  if (state->priv_blob && state->priv_blob_len > 0)
-    offset = append_flash_block (buf, offset, 4,
-                                 state->priv_blob, state->priv_blob_len);
+  if (ok && state->priv_blob && state->priv_blob_len > 0)
+    ok = append_flash_block (buf, TLS_FLASH_IMAGE_SIZE, &offset, 4,
+                             state->priv_blob, state->priv_blob_len);
 
-  /* Block 3: server certificate */
-  if (state->server_cert && state->server_cert_len > 0)
-    offset = append_flash_block (buf, offset, 3,
-                                 state->server_cert, state->server_cert_len);
+  /* Block 3: server certificate (length is device-controlled) */
+  if (ok && state->server_cert && state->server_cert_len > 0)
+    ok = append_flash_block (buf, TLS_FLASH_IMAGE_SIZE, &offset, 3,
+                             state->server_cert, state->server_cert_len);
 
   /* Block 5: CA certificate (from runtime data files) */
-  offset = append_flash_block (buf, offset, 5, ca_cert, ca_cert_len);
+  ok = ok && append_flash_block (buf, TLS_FLASH_IMAGE_SIZE, &offset, 5, ca_cert, ca_cert_len);
 
   /* Block 1: empty placeholder (256 zeros) */
-  offset = append_flash_block (buf, offset, 1, empty_block, sizeof (empty_block));
+  ok = ok && append_flash_block (buf, TLS_FLASH_IMAGE_SIZE, &offset, 1, empty_block, sizeof (empty_block));
 
   /* Block 2: empty placeholder (256 zeros) */
-  offset = append_flash_block (buf, offset, 2, empty_block, sizeof (empty_block));
+  ok = ok && append_flash_block (buf, TLS_FLASH_IMAGE_SIZE, &offset, 2, empty_block, sizeof (empty_block));
 
-  /* Block 6: ECDH blob */
-  if (state->ecdh_blob && state->ecdh_blob_len > 0)
-    offset = append_flash_block (buf, offset, 6,
-                                 state->ecdh_blob, state->ecdh_blob_len);
+  /* Block 6: ECDH blob (length is device-controlled) */
+  if (ok && state->ecdh_blob && state->ecdh_blob_len > 0)
+    ok = append_flash_block (buf, TLS_FLASH_IMAGE_SIZE, &offset, 6,
+                             state->ecdh_blob, state->ecdh_blob_len);
+
+  if (!ok)
+    {
+      /* A device-supplied block did not fit in the fixed flash image. */
+      fp_warn ("TLS flash image build overflowed — refusing to pair");
+      g_free (buf);
+      *out_len = 0;
+      return NULL;
+    }
 
   /* Remaining bytes stay 0xff from initial memset */
-  (void) offset;
-
   *out_len = TLS_FLASH_IMAGE_SIZE;
   return buf;
 }
@@ -940,7 +957,16 @@ pair_cmd50_process (FpiSsm            *ssm,
   ps->ecdh_blob_len = 400;
 
   /* Parse ECDH blob to extract server public key.
-   * This sets self->tls.ecdh_q and ecdh_blob. */
+   * This sets self->tls.ecdh_q and ecdh_blob.
+   *
+   * SECURITY: the sensor's ECDH public key is accepted here with NO signature
+   * verification against the firmware public key (the open path in
+   * validity_tls.c does attempt it, but only non-fatally). A malicious or
+   * MITM'd sensor can therefore supply an attacker-chosen key and stand up a
+   * TLS session it controls. This matches python-validity, which cannot verify
+   * either because the required firmware pubkeys are not reliably available per
+   * device. Making verification fatal needs per-model firmware-pubkey data
+   * validated against real hardware; tracked as a known limitation. */
   self->tls.ecdh_blob = g_memdup2 (ecdh_data, 400);
   self->tls.ecdh_blob_len = 400;
 
@@ -1152,6 +1178,13 @@ pair_write_flash_send (FpiSsm            *ssm,
   g_autofree guint8 *flash_data =
     validity_pair_build_tls_flash (ps, ca_data, ca_len, &flash_len);
 
+  if (!flash_data)
+    {
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+      return;
+    }
+
   /* CMD 0x41: WRITE_FLASH
    * Format: [0x41][partition:1][flag:1][reserved:2][offset:4LE][size:4LE][data]
    * python-validity: pack('<BBBHLL', 0x41, partition, 1, 0, addr, len(buf)) + buf */
@@ -1317,7 +1350,11 @@ validity_pair_run_state (FpiSsm   *ssm,
       break;
 
     case PAIR_TLS_HANDSHAKE:
+      /* Starts an async TLS handshake sub-SSM; on completion the parent SSM
+       * auto-advances to PAIR_ERASE_DBE_SEND. Must break here -- falling
+       * through would emit TLS app-data with not-yet-derived session keys. */
       pair_tls_handshake (ssm, self);
+      break;
 
     case PAIR_ERASE_DBE_SEND:
       pair_erase_dbe_send (ssm, self);
@@ -1366,7 +1403,10 @@ validity_pair_run_state (FpiSsm   *ssm,
       break;
 
     case PAIR_ERASE_LOOP:
+      /* Self-advances (jump back to erase, or next state when done). Must
+       * break -- falling through would fire a duplicate TLS command. */
       pair_erase_loop (ssm, self);
+      break;
 
     case PAIR_WRITE_DBE_SEND:
       pair_write_dbe_send (ssm, self);

@@ -227,6 +227,15 @@ tls_unpad (const guint8 *data, gsize data_len, gsize *unpadded_len,
     }
 
   *unpadded_len = data_len - pad_count;
+  if (*unpadded_len == 0)
+    {
+      /* All-padding record carries no plaintext. Reject with an error set:
+       * g_memdup2(data, 0) returns NULL, and a NULL return with *error unset
+       * reaches fpi_ssm_mark_failed(NULL), which aborts the daemon. */
+      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                   "TLS decrypt: empty plaintext record");
+      return NULL;
+    }
   guint8 *out = g_memdup2 (data, *unpadded_len);
   return out;
 }
@@ -336,16 +345,37 @@ validity_tls_decrypt (ValidityTlsState *tls,
   const guint8 *enc_data = ciphertext + TLS_IV_SIZE;
   gsize enc_len = ciphertext_len - TLS_IV_SIZE;
 
+  /* CBC ciphertext is always a whole number of blocks. Reject otherwise so a
+   * partial final block can't leave the decrypt output length undefined. */
+  if (enc_len % TLS_AES_BLOCK_SIZE != 0)
+    {
+      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                   "TLS ciphertext not block-aligned");
+      return NULL;
+    }
+
   guint8 *decrypted = g_malloc (enc_len);
-  int dec_len, final_len;
+  int dec_len = 0, final_len = 0;
+  gboolean ok = FALSE;
 
   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new ();
-  EVP_DecryptInit_ex (ctx, EVP_aes_256_cbc (), NULL,
-                      tls->decryption_key, iv);
-  EVP_CIPHER_CTX_set_padding (ctx, 0);
-  EVP_DecryptUpdate (ctx, decrypted, &dec_len, enc_data, enc_len);
-  EVP_DecryptFinal_ex (ctx, decrypted + dec_len, &final_len);
+  if (ctx &&
+      EVP_DecryptInit_ex (ctx, EVP_aes_256_cbc (), NULL,
+                          tls->decryption_key, iv) == 1)
+    {
+      EVP_CIPHER_CTX_set_padding (ctx, 0);
+      ok = EVP_DecryptUpdate (ctx, decrypted, &dec_len, enc_data, enc_len) == 1 &&
+           EVP_DecryptFinal_ex (ctx, decrypted + dec_len, &final_len) == 1;
+    }
   EVP_CIPHER_CTX_free (ctx);
+
+  if (!ok)
+    {
+      g_free (decrypted);
+      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                   "TLS decrypt: CBC decryption failed");
+      return NULL;
+    }
 
   gsize total_dec = dec_len + final_len;
   guint8 *unpadded = tls_unpad (decrypted, total_dec, out_len, error);
@@ -621,16 +651,35 @@ handle_priv_block (ValidityTlsState *tls,
   const guint8 *enc_data = ct + TLS_IV_SIZE;
   gsize enc_len = ct_len - TLS_IV_SIZE;
 
+  if (enc_len % TLS_AES_BLOCK_SIZE != 0)
+    {
+      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                   "TLS flash: private key blob not block-aligned");
+      return FALSE;
+    }
+
   guint8 *decrypted = g_malloc (enc_len);
-  int dec_len, final_len;
+  int dec_len = 0, final_len = 0;
+  gboolean dec_ok = FALSE;
 
   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new ();
-  EVP_DecryptInit_ex (ctx, EVP_aes_256_cbc (), NULL,
-                      tls->psk_encryption_key, iv);
-  EVP_CIPHER_CTX_set_padding (ctx, 0);
-  EVP_DecryptUpdate (ctx, decrypted, &dec_len, enc_data, enc_len);
-  EVP_DecryptFinal_ex (ctx, decrypted + dec_len, &final_len);
+  if (ctx &&
+      EVP_DecryptInit_ex (ctx, EVP_aes_256_cbc (), NULL,
+                          tls->psk_encryption_key, iv) == 1)
+    {
+      EVP_CIPHER_CTX_set_padding (ctx, 0);
+      dec_ok = EVP_DecryptUpdate (ctx, decrypted, &dec_len, enc_data, enc_len) == 1 &&
+               EVP_DecryptFinal_ex (ctx, decrypted + dec_len, &final_len) == 1;
+    }
   EVP_CIPHER_CTX_free (ctx);
+
+  if (!dec_ok)
+    {
+      g_free (decrypted);
+      g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
+                   "TLS flash: private key CBC decryption failed");
+      return FALSE;
+    }
 
   gsize total_dec = dec_len + final_len;
 
@@ -808,10 +857,15 @@ handle_ecdh_block (ValidityTlsState *tls,
 
   if (!verify_ok)
     {
-      EVP_PKEY_free (ecdh_pubkey);
+      /* Do NOT free ecdh_pubkey here: it is stored below and used for the
+       * ECDH handshake. Freeing it (then storing the dangling pointer) is a
+       * use-after-free / double-free. The signature check is non-fatal to
+       * match python-validity, which also proceeds on some devices whose
+       * blobs do not verify against the shipped firmware public key.
+       * SECURITY: leaving this non-fatal means the sensor's ECDH key is not
+       * authenticated; see the driver notes on the fw_pubkey data files. */
       fp_warn ("TLS flash: ECDH blob signature verification failed "
                "(non-fatal, continuing)");
-      /* Continue anyway — python-validity also ignores this on some devices */
     }
 
   if (tls->ecdh_q)
