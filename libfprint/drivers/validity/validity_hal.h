@@ -32,6 +32,7 @@ typedef enum {
   VALIDITY_HAL_DEV_9D,
   VALIDITY_HAL_DEV_AB,
   VALIDITY_HAL_DEV_CB,
+  VALIDITY_HAL_DEV_B7,
 } ValidityHalDeviceType;
 
 /* Flash partition entry — matches python-validity PartitionInfo:
