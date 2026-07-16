@@ -54,6 +54,8 @@ typedef enum {
   VALIDITY_DEV_97,      /* 138a:0097 */
   VALIDITY_DEV_9A,      /* 06cb:009a */
   VALIDITY_DEV_9D,      /* 138a:009d */
+  VALIDITY_DEV_AB,      /* 138a:00ab (HP ZBook Studio x360 G5) */
+  VALIDITY_DEV_CB,      /* 06cb:00cb (HP Pavilion x360 14-dh) */
 } ValidityDeviceType;
 
 /* Firmware version info from GET_VERSION (cmd 0x01) */
@@ -281,6 +283,11 @@ struct _FpiDeviceValidity
   guint16 enroll_user_dbid;
   guint16 enroll_storage_dbid;
   guint   scan_incomplete_count;
+  gboolean enroll_frame_rejected;   /* sensor rejected the last frame (0x0526) — retry stage */
+
+  /* Verify: retry state for empty/phantom captures (no finger down) */
+  guint    verify_capture_retries;
+  gboolean verify_recapture;
 
   /* Verify/identify mode flag: TRUE = identify, FALSE = verify */
   gboolean identify_mode;
@@ -335,6 +342,10 @@ gboolean parse_enrollment_update_response (const guint8           *data,
                                            EnrollmentUpdateResult *result);
 
 /* Verify/Identify SSMs (validity_verify.c) */
+/* Map a USB "no device" error (intermittent re-enumeration) to
+ * FP_DEVICE_ERROR_REMOVED. Takes ownership of @error, returns the result. */
+GError *validity_map_removed_error (GError *error);
+
 void validity_verify (FpDevice *device);
 void validity_identify (FpDevice *device);
 void validity_list (FpDevice *device);

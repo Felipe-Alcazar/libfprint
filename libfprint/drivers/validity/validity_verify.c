@@ -124,6 +124,21 @@ verify_interrupt_cb (FpiUsbTransfer *transfer,
           fpi_ssm_next_state (ssm);
           return;
         }
+      /* 0x969/0xd51 silicon omits the type-2 finger-down and signals the
+       * finger with a type-3 capture event. Accept it as finger-down; if it
+       * already carries the scan-complete bit, skip VERIFY_WAIT_SCAN_COMPLETE
+       * (a fresh read there would hang waiting for a type-3 that already
+       * arrived). */
+      if (int_type == 3 && self->sensor.device_info &&
+          validity_sensor_skips_finger_down (self->sensor.real_sensor_type))
+        {
+          if (transfer->actual_length >= 3 &&
+              (transfer->buffer[2] & VALIDITY_INT_SCAN_COMPLETE))
+            fpi_ssm_jump_to_state (ssm, VERIFY_GET_PRG_STATUS);
+          else
+            fpi_ssm_next_state (ssm);
+          return;
+        }
       /* type 0 = capture started, expected */
       if (int_type == 0)
         goto read_again;
@@ -412,6 +427,8 @@ verify_run_state (FpiSsm   *ssm,
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case VERIFY_LED_ON:
+      self->verify_capture_retries = 0;
+      self->verify_recapture = FALSE;
       {
         gsize cmd_len;
         const guint8 *cmd = validity_capture_glow_start_cmd (&cmd_len);
@@ -451,7 +468,43 @@ verify_run_state (FpiSsm   *ssm,
       break;
 
     case VERIFY_GET_PRG_STATUS_RECV:
-      /* Status doesn't matter, just advance */
+      /* Capture status: len(4) | x(2) | y(2) | w1(2) | w2(2) | error(4).
+       * A real finger reports non-zero geometry and error==0. An empty
+       * "phantom" capture (no finger on the sensor) reports x=0/y=0 and a
+       * non-zero error. python-validity raises on this and its identify loop
+       * re-captures; mirror that so verify waits for a real finger instead of
+       * running a match that can only fail. */
+      {
+        gboolean empty = TRUE;
+
+        if (self->cmd_response_data && self->cmd_response_len >= 16)
+          {
+            const guint8 *d = self->cmd_response_data;
+            guint16 x   = d[4]  | (d[5]  << 8);
+            guint16 y   = d[6]  | (d[7]  << 8);
+            guint16 w1  = d[8]  | (d[9]  << 8);
+            guint16 w2  = d[10] | (d[11] << 8);
+            guint32 err = d[12] | (d[13] << 8) | (d[14] << 16) | ((guint32) d[15] << 24);
+            fp_dbg ("Verify capture status: x=%u y=%u w1=%u w2=%u error=0x%08x",
+                    x, y, w1, w2, err);
+            empty = (err != 0 || x == 0 || y == 0);
+          }
+
+        if (empty)
+          {
+            /* No finger on the sensor yet. Re-arm and wait. Like every other
+             * finger-wait in this driver, this is unbounded and terminated by
+             * the operation's GCancellable (fprintd's timeout or a user
+             * cancel) rather than a fixed driver-side timeout. */
+            self->verify_recapture = TRUE;
+            fp_dbg ("Verify: empty capture (no finger yet) — re-arming (attempt %u)",
+                    ++self->verify_capture_retries);
+          }
+        else
+          {
+            self->verify_capture_retries = 0;
+          }
+      }
       fpi_ssm_next_state (ssm);
       break;
 
@@ -463,8 +516,16 @@ verify_run_state (FpiSsm   *ssm,
       break;
 
     case VERIFY_CAPTURE_STOP_RECV:
-      /* Cleanup status doesn't matter */
-      fpi_ssm_next_state (ssm);
+      /* Cleanup status doesn't matter. If the last capture was empty (no
+       * finger), loop back to re-arm; a short delay avoids busy-looping the
+       * sensor while waiting for the user to place a finger. */
+      if (self->verify_recapture)
+        {
+          self->verify_recapture = FALSE;
+          fpi_ssm_jump_to_state_delayed (ssm, VERIFY_BUILD_CAPTURE, 300);
+        }
+      else
+        fpi_ssm_next_state (ssm);
       break;
 
     case VERIFY_MATCH_START:
@@ -545,6 +606,7 @@ verify_ssm_done (FpiSsm   *ssm,
 
   if (error)
     {
+      error = validity_map_removed_error (error);
       if (self->identify_mode)
         fpi_device_identify_complete (dev, error);
       else
@@ -837,6 +899,29 @@ list_get_user_recv (FpiSsm            *ssm,
               if (finger >= 0)
                 fp_print_set_finger (print, (FpFinger) finger);
 
+              /* Set fpi-data to the identity UUID string, matching what
+               * enroll stores (g_variant_new_string(user_id)), so the print
+               * serialises and fp_print_equal() can match it against a saved
+               * print. Identity blob: type(4LE) | len(4LE) | UUID[len]. */
+              if (user.identity && user.identity_len >= 8)
+                {
+                  FpiByteReader idr;
+                  guint32 id_type = 0, id_len = 0;
+                  const guint8 *uuid_bytes = NULL;
+
+                  fpi_byte_reader_init (&idr, user.identity, user.identity_len);
+                  if (fpi_byte_reader_get_uint32_le (&idr, &id_type) &&
+                      fpi_byte_reader_get_uint32_le (&idr, &id_len) &&
+                      id_len > 0 &&
+                      fpi_byte_reader_get_data (&idr, id_len, &uuid_bytes))
+                    {
+                      g_autofree gchar *uuid =
+                        g_strndup ((const gchar *) uuid_bytes, id_len);
+                      g_object_set (print, "fpi-data",
+                                    g_variant_new_string (uuid), NULL);
+                    }
+                }
+
               g_ptr_array_add (prints_array, print);
             }
 
@@ -894,11 +979,15 @@ list_ssm_done (FpiSsm   *ssm,
 
   if (error)
     {
-      fpi_device_list_complete (dev, NULL, error);
+      fpi_device_list_complete (dev, NULL, validity_map_removed_error (error));
       return;
     }
 
-  fpi_device_list_complete (dev, g_steal_pointer (&prints_array), NULL);
+  /* The ssm still owns a reference via its g_ptr_array_unref destroy notify
+   * (set with fpi_ssm_set_data), so hand list_complete its own reference —
+   * otherwise the array is unreffed twice and freed while the caller still
+   * iterates it (use-after-free). */
+  fpi_device_list_complete (dev, g_ptr_array_ref (prints_array), NULL);
 }
 
 void
@@ -1116,7 +1205,7 @@ delete_ssm_done (FpiSsm   *ssm,
   FpiDeviceValidity *self = FPI_DEVICE_VALIDITY (dev);
 
   validity_user_storage_clear (&self->list_storage);
-  fpi_device_delete_complete (dev, error);
+  fpi_device_delete_complete (dev, validity_map_removed_error (error));
 }
 
 void

@@ -1708,7 +1708,7 @@ static const guint8 capture_prog_type1_0199[] = {
 static const guint16 line_update_type1_devices[] = {
   0x00B5, 0x0885, 0x00B3, 0x143B, 0x1055,
   0x00E1, 0x08B1, 0x00EA, 0x00E4, 0x00ED,
-  0x1825, 0x1FF5, 0x0199,
+  0x1825, 0x1FF5, 0x0199, 0x0969, 0x0D51,
 };
 
 const guint8 *
@@ -1723,8 +1723,10 @@ validity_capture_prog_lookup (guint8  rom_major,
    * type-1 devices with 0x78 bytes/line geometry. */
   if (rom_major == 6)
     {
-      /* Device-specific programs take priority */
-      if (dev_type == 0x0199)
+      /* Device-specific programs take priority. 0x969 and 0xd51 silicon alias
+       * to the 0x199 profile (identical 57K0 geometry) and use its capture
+       * program; mirrors python-validity aliasing device_info.type -> 0x199. */
+      if (dev_type == 0x0199 || dev_type == 0x0969 || dev_type == 0x0d51)
         {
           *out_len = sizeof (capture_prog_type1_0199);
           return capture_prog_type1_0199;

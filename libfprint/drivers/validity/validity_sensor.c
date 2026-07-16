@@ -104,6 +104,8 @@ static const ValiditySensorTypeInfo sensor_type_info_table[] = {
   /* 57K0 family (06cb:009a) */
   { 0x00b5, 0x78, 2, 112, 112, calib_blob_57k0, sizeof (calib_blob_57k0) },
   { 0x0199, 0x78, 2, 112, 112, calib_blob_57k0, sizeof (calib_blob_57k0) },
+  { 0x0969, 0x78, 2, 112, 112, calib_blob_57k0, sizeof (calib_blob_57k0) },  /* HP ZBook Studio x360 G5 138a:00ab + HP Pavilion x360 14-dh 06cb:00cb (57K0 family) */
+  { 0x0d51, 0x78, 2, 112, 112, calib_blob_57k0, sizeof (calib_blob_57k0) },  /* HP EliteBook 840 G5 138a:00ab + HP G6 series 06cb:00b7 (57K0 family) */
   { 0x0885, 0x78, 2, 112, 112, calib_blob_57k0, sizeof (calib_blob_57k0) },
   { 0x1055, 0x78, 2, 112, 112, calib_blob_57k0, sizeof (calib_blob_57k0) },
   { 0x1825, 0x78, 2, 112, 112, calib_blob_57k0, sizeof (calib_blob_57k0) },
@@ -397,6 +399,19 @@ validity_sensor_type_info_lookup (guint16 sensor_type)
       return &sensor_type_info_table[i];
 
   return NULL;
+}
+
+/* Some silicon revisions never emit the type-2 "finger down" interrupt during
+ * a capture: sensor type 0x969 (HP ZBook Studio x360 G5 138a:00ab and HP
+ * Pavilion x360 14-dh 06cb:00cb) and 0xd51 (HP EliteBook 840 G5 138a:00ab,
+ * HP G6 series 06cb:00b7). They jump straight from the type-0 start ack to
+ * type-3 capture events, so callers waiting for finger-down must accept a
+ * type-3 interrupt as a substitute. Mirrors python-validity's
+ * `real_device_type in (0xd51, 0x969)` check in Sensor.capture(). */
+gboolean
+validity_sensor_skips_finger_down (guint16 sensor_type)
+{
+  return sensor_type == 0x0969 || sensor_type == 0x0d51;
 }
 
 /* ================================================================

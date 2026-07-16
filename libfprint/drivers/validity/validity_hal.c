@@ -96,6 +96,18 @@ static const ValidityDeviceDesc device_table[] = {
     .pid = 0x009d,
     .flash_layout = &flash_layout_standard,
   },
+
+  [VALIDITY_HAL_DEV_AB] = {
+    .vid = 0x138a,
+    .pid = 0x00ab,
+    .flash_layout = &flash_layout_standard,
+  },
+
+  [VALIDITY_HAL_DEV_CB] = {
+    .vid = 0x06cb,
+    .pid = 0x00cb,
+    .flash_layout = &flash_layout_standard,
+  },
 };
 
 /* ================================================================

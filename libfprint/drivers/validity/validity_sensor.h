@@ -76,6 +76,11 @@ typedef struct
   const ValidityDeviceInfo     *device_info;
   const ValiditySensorTypeInfo *type_info;
 
+  /* True silicon type for the finger-down interrupt logic. Normally equal to
+   * device_info->type, but forced to 0x969 for FM-154/FM-3439 units that
+   * re-enumerate reporting type 0x199 after suspend/resume (see validity.c). */
+  guint16                       real_sensor_type;
+
   /* Factory calibration bits (raw response from cmd 0x6f) */
   guint8 *factory_bits;
   gsize   factory_bits_len;
@@ -108,6 +113,13 @@ const ValidityDeviceInfo *validity_device_info_lookup (guint16 major,
  * Returns NULL if the type is not in the table.
  */
 const ValiditySensorTypeInfo *validity_sensor_type_info_lookup (guint16 sensor_type);
+
+/*
+ * TRUE for silicon that never emits the type-2 finger-down interrupt (sensor
+ * types 0x969 and 0xd51); such sensors signal finger contact with a type-3
+ * capture event instead. See validity_sensor.c for details.
+ */
+gboolean validity_sensor_skips_finger_down (guint16 sensor_type);
 
 /* ---- Command building ---- */
 

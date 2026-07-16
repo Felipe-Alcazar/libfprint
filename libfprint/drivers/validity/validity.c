@@ -36,8 +36,28 @@ static const FpIdEntry id_table[] = {
   { .vid = 0x138A, .pid = 0x0097, .driver_data = VALIDITY_DEV_97 },
   { .vid = 0x06CB, .pid = 0x009A, .driver_data = VALIDITY_DEV_9A },
   { .vid = 0x138A, .pid = 0x009D, .driver_data = VALIDITY_DEV_9D },
+  { .vid = 0x138A, .pid = 0x00AB, .driver_data = VALIDITY_DEV_AB },
+  { .vid = 0x06CB, .pid = 0x00CB, .driver_data = VALIDITY_DEV_CB },
   { .vid = 0,      .pid = 0,      .driver_data = 0 },
 };
+
+/* Map a USB "no device" error — the sensor dropped off the bus after one of its
+ * intermittent re-enumerations — to FP_DEVICE_ERROR_REMOVED, so fprintd treats
+ * it as a device removal (re-detecting the re-enumerated device and retrying)
+ * rather than a generic protocol failure. Takes ownership of @error and returns
+ * the (possibly replaced) error. */
+GError *
+validity_map_removed_error (GError *error)
+{
+  if (error &&
+      g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_NO_DEVICE))
+    {
+      fp_info ("Device dropped off the bus (re-enumeration) — reporting as removed");
+      g_error_free (error);
+      return fpi_device_error_new (FP_DEVICE_ERROR_REMOVED);
+    }
+  return error;
+}
 
 /* ================================================================
  * Probe
@@ -873,6 +893,26 @@ open_sensor_identify_recv (FpiSsm            *ssm,
       self->sensor.type_info = validity_sensor_type_info_lookup (
         self->sensor.device_info->type);
 
+      /* Determine the true silicon type for finger-down interrupt handling.
+       * FM-154/FM-3439 sensors are 0x969 silicon, but after suspend/resume
+       * they re-enumerate reporting sensor type 0x199 directly rather than
+       * 0x969. Left unhandled, the type-3-as-finger-down path (which keys off
+       * the real type) would be bypassed and verify/enroll would hang waiting
+       * for a type-2 interrupt this silicon never emits. The device name is
+       * stable across boot and resume, so key off it: FM-3439-xxx and
+       * FM-154-xxx are the known 0x969 model families. Genuine 0x199 chips
+       * (FM-3367, FM-155, FM-3380) do not match either pattern and keep their
+       * real type. Mirrors python-validity Sensor.open(). */
+      self->sensor.real_sensor_type = self->sensor.device_info->type;
+      if (self->sensor.device_info->type == 0x0199 &&
+          (g_strstr_len (self->sensor.device_info->name, -1, "FM-3439") ||
+           g_strstr_len (self->sensor.device_info->name, -1, "FM-154")))
+        {
+          fp_info ("Sensor %s reporting type 0x199 (post-resume), treating as 0x969",
+                   self->sensor.device_info->name);
+          self->sensor.real_sensor_type = 0x0969;
+        }
+
       if (self->sensor.type_info)
         {
           fp_info ("Sensor type: 0x%04x, %u bytes/line, %ux repeat",
@@ -1264,7 +1304,7 @@ open_ssm_done (FpiSsm   *ssm,
   if (error)
     {
       g_usb_device_release_interface (fpi_device_get_usb_device (dev), 0, 0, NULL);
-      fpi_device_open_complete (dev, error);
+      fpi_device_open_complete (dev, validity_map_removed_error (error));
       return;
     }
 
@@ -1292,7 +1332,7 @@ dev_open (FpDevice *device)
 
   if (!g_usb_device_claim_interface (fpi_device_get_usb_device (device), 0, 0, &error))
     {
-      fpi_device_open_complete (device, error);
+      fpi_device_open_complete (device, validity_map_removed_error (error));
       return;
     }
 

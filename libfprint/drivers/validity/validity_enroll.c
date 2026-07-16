@@ -115,6 +115,38 @@ interrupt_cb (FpiUsbTransfer *transfer,
               int_type, transfer->actual_length);
     }
 
+  /* Sensors that skip the type-2 finger-down interrupt (0x969/0xd51) jump
+   * straight to type-3 capture events while we are still waiting for
+   * finger-down. Accept the type-3 as the finger-down signal. Mirror
+   * python-validity's saved_b: the same type-3 must also be tested for
+   * scan-complete, because a single type-3 can carry both — advancing to
+   * ENROLL_WAIT_SCAN_COMPLETE (which issues a fresh read) would lose it and
+   * hang. */
+  if (target_state == VALIDITY_INT_FINGER_DOWN && int_type == 3 &&
+      self->sensor.device_info &&
+      validity_sensor_skips_finger_down (self->sensor.real_sensor_type))
+    {
+      fp_info ("Finger detected on sensor (type-3; this silicon omits type-2)");
+      fpi_device_report_finger_status_changes (
+        FP_DEVICE (self), FP_FINGER_STATUS_PRESENT, FP_FINGER_STATUS_NEEDED);
+
+      if (transfer->actual_length >= 3 &&
+          (transfer->buffer[2] & VALIDITY_INT_SCAN_COMPLETE))
+        {
+          /* Finger-down and scan-complete arrived together — skip the
+           * separate scan-complete wait, which would block on a fresh read. */
+          self->scan_incomplete_count = 0;
+          fpi_ssm_jump_to_state (ssm, ENROLL_GET_PRG_STATUS);
+        }
+      else
+        {
+          /* Finger down, scan still in progress — await the completing
+           * type-3 in ENROLL_WAIT_SCAN_COMPLETE. */
+          fpi_ssm_next_state (ssm);
+        }
+      return;
+    }
+
   /* Check if this is the interrupt we're waiting for */
   if (int_type == (guint8) target_state)
     {
@@ -313,6 +345,7 @@ enroll_cleanup_stale (FpiSsm            *ssm,
   self->enroll_key = 0;
   self->enroll_stage = 0;
   self->scan_incomplete_count = 0;
+  self->enroll_frame_rejected = FALSE;
   g_clear_pointer (&self->enroll_template, g_free);
   self->enroll_template_len = 0;
   vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
@@ -549,6 +582,18 @@ enroll_append_image_read_recv (FpiSsm            *ssm,
 {
   if (self->cmd_response_status != VCSFW_STATUS_OK)
     {
+      /* Status 0x0526 = the sensor rejected this frame (typically a
+       * near-duplicate from a finger that wasn't lifted between stages).
+       * Not fatal: close the enrollment session (ENROLL_UPDATE_END) and let
+       * the loop re-capture this stage, reporting a retry to the user — this
+       * mirrors python-validity's enroll loop, which retries on any bad frame. */
+      if (self->cmd_response_status == 0x0526)
+        {
+          fp_info ("enrollment_update rejected the frame (0x0526) — retrying stage");
+          self->enroll_frame_rejected = TRUE;
+          fpi_ssm_jump_to_state (ssm, ENROLL_UPDATE_END);
+          return;
+        }
       fp_warn ("enrollment_update (read) failed: status=0x%04x",
                self->cmd_response_status);
       fpi_ssm_mark_failed (ssm,
@@ -606,6 +651,19 @@ enroll_loop_check (FpiSsm            *ssm,
                    FpiDeviceValidity *self)
 {
   FpDevice *dev = FP_DEVICE (self);
+
+  /* The sensor rejected the last frame (0x0526): report a retry and re-capture
+   * the SAME stage without advancing progress, instead of failing the enroll. */
+  if (self->enroll_frame_rejected)
+    {
+      self->enroll_frame_rejected = FALSE;
+      fpi_device_enroll_progress (
+        dev, self->enroll_stage, NULL,
+        fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
+      fp_info ("Enrollment frame rejected — retrying stage %u", self->enroll_stage + 1);
+      fpi_ssm_jump_to_state (ssm, ENROLL_LED_ON);
+      return;
+    }
 
   self->enroll_stage++;
 
@@ -939,7 +997,22 @@ enroll_run_state (FpiSsm   *ssm,
       break;
 
     case ENROLL_GET_PRG_STATUS_RECV:
-      /* Status doesn't matter, just advance */
+      /* DIAG: log capture geometry/error to compare enroll vs verify capture
+       * quality. Response payload: len(4) | x(2) | y(2) | w1(2) | w2(2) | error(4). */
+      if (self->cmd_response_data && self->cmd_response_len >= 16)
+        {
+          const guint8 *d = self->cmd_response_data;
+          guint16 x  = d[4]  | (d[5]  << 8);
+          guint16 y  = d[6]  | (d[7]  << 8);
+          guint16 w1 = d[8]  | (d[9]  << 8);
+          guint16 w2 = d[10] | (d[11] << 8);
+          guint32 err = d[12] | (d[13] << 8) | (d[14] << 16) | ((guint32) d[15] << 24);
+          fp_dbg ("Enroll capture (stage %u): x=%u y=%u w1=%u w2=%u error=0x%08x",
+                  self->enroll_stage, x, y, w1, w2, err);
+        }
+      else
+        fp_dbg ("Enroll capture: short status response (len=%" G_GSIZE_FORMAT ")",
+                self->cmd_response_len);
       fpi_ssm_next_state (ssm);
       break;
 
@@ -1286,7 +1359,7 @@ enroll_ssm_done (FpiSsm   *ssm,
       g_clear_pointer (&self->bulk_data, g_free);
       self->bulk_data_len = 0;
 
-      fpi_device_enroll_complete (dev, NULL, error);
+      fpi_device_enroll_complete (dev, NULL, validity_map_removed_error (error));
       return;
     }
 
