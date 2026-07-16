@@ -1180,10 +1180,13 @@ validity_capture_parse_factory_bits (const guint8 *data,
         break;
 
       /* Subtag 3: factory calibration values.
-       * First 4 bytes are a header; actual values start at +4. */
+       * First 4 bytes are a header; actual values start at +4.
+       * Free any earlier allocation first: a device may (validly or
+       * maliciously) send more than one subtag-3 entry. */
       if (subtag == 3 && length > 4)
         {
           *cal_values_len = length - 4;
+          g_clear_pointer (cal_values, g_free);
           *cal_values = g_memdup2 (entry_data + 4, *cal_values_len);
           found_subtag3 = TRUE;
         }
@@ -1193,6 +1196,7 @@ validity_capture_parse_factory_bits (const guint8 *data,
       if (subtag == 7 && length > 4 && cal_data && cal_data_len)
         {
           *cal_data_len = length - 4;
+          g_clear_pointer (cal_data, g_free);
           *cal_data = g_memdup2 (entry_data + 4, *cal_data_len);
         }
     }

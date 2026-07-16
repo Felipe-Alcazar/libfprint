@@ -380,7 +380,11 @@ validity_device_info_lookup (guint16 major,
 
       if (version == 0 || masked_ver == 0)
         fuzzy_match = entry;
-      else if ((guint8) version == masked_ver)
+      else if (version == masked_ver)
+        /* Compare the full 16-bit reported version, not just its low byte:
+         * matches python-validity dev_info_lookup() and correctly rejects a
+         * version whose high byte is set instead of aliasing it onto a
+         * low-byte table row. All real devices report version <= 0xff. */
         return entry;
     }
 

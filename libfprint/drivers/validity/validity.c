@@ -61,6 +61,8 @@ validity_map_removed_error (GError *error)
   return error;
 }
 
+static void validity_release_state (FpiDeviceValidity *self);
+
 /* ================================================================
  * Probe
  * ================================================================
@@ -1305,6 +1307,7 @@ open_ssm_done (FpiSsm   *ssm,
 
   if (error)
     {
+      validity_release_state (self);
       g_usb_device_release_interface (fpi_device_get_usb_device (dev), 0, 0, NULL);
       fpi_device_open_complete (dev, validity_map_removed_error (error));
       return;
@@ -1323,7 +1326,6 @@ dev_open (FpDevice *device)
 
   G_DEBUG_HERE ();
 
-  self->interrupt_cancellable = g_cancellable_new ();
   validity_tls_init (&self->tls);
   validity_sensor_state_init (&self->sensor);
   validity_capture_state_init (&self->capture);
@@ -1334,6 +1336,7 @@ dev_open (FpDevice *device)
 
   if (!g_usb_device_claim_interface (fpi_device_get_usb_device (device), 0, 0, &error))
     {
+      validity_release_state (self);
       fpi_device_open_complete (device, validity_map_removed_error (error));
       return;
     }
@@ -1347,15 +1350,13 @@ dev_open (FpDevice *device)
  * Close
  * ================================================================ */
 
+/* Release all per-open heap state. Safe to call more than once and on
+ * partially-initialised state (every field is cleared to NULL/0). Called from
+ * dev_close and from the open-failure paths, where the device layer never
+ * invokes dev_close (is_open stays FALSE) so this is the only cleanup. */
 static void
-dev_close (FpDevice *device)
+validity_release_state (FpiDeviceValidity *self)
 {
-  FpiDeviceValidity *self = FPI_DEVICE_VALIDITY (device);
-
-  g_autoptr(GError) error = NULL;
-
-  G_DEBUG_HERE ();
-
   g_clear_pointer (&self->cmd_response_data, g_free);
   self->cmd_response_len = 0;
 
@@ -1373,30 +1374,22 @@ dev_close (FpDevice *device)
   validity_data_store_free (&self->common_data);
 
   g_clear_pointer (&self->emulation_prints, g_ptr_array_unref);
+}
 
-  g_clear_object (&self->interrupt_cancellable);
+static void
+dev_close (FpDevice *device)
+{
+  FpiDeviceValidity *self = FPI_DEVICE_VALIDITY (device);
+
+  g_autoptr(GError) error = NULL;
+
+  G_DEBUG_HERE ();
+
+  validity_release_state (self);
 
   g_usb_device_release_interface (fpi_device_get_usb_device (device), 0, 0, &error);
 
   fpi_device_close_complete (device, g_steal_pointer (&error));
-}
-
-/* ================================================================
- * Enroll / Verify / Identify / Delete / List
- * ================================================================
- *
- * Real implementations now in validity_enroll.c and validity_verify.c.
- * These thin wrappers call the external SSM starters.
- */
-
-static void
-cancel (FpDevice *device)
-{
-  FpiDeviceValidity *self = FPI_DEVICE_VALIDITY (device);
-
-  g_cancellable_cancel (self->interrupt_cancellable);
-  g_clear_object (&self->interrupt_cancellable);
-  self->interrupt_cancellable = g_cancellable_new ();
 }
 
 /* ================================================================
@@ -1430,7 +1423,6 @@ fpi_device_validity_class_init (FpiDeviceValidityClass *klass)
   dev_class->delete = validity_delete;
   dev_class->list = validity_list;
   dev_class->clear_storage = validity_clear_storage;
-  dev_class->cancel = cancel;
 
   fpi_device_class_auto_initialize_features (dev_class);
 }

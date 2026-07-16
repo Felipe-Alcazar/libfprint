@@ -167,7 +167,7 @@ read_again:
     fpi_usb_transfer_fill_interrupt (new_transfer, VALIDITY_EP_INT_IN,
                                      VALIDITY_USB_INT_DATA_SIZE);
     fpi_usb_transfer_submit (new_transfer, 0,
-                             self->interrupt_cancellable,
+                             fpi_device_get_cancellable (FP_DEVICE (self)),
                              verify_interrupt_cb, ssm);
   }
 }
@@ -182,10 +182,10 @@ verify_start_interrupt_wait (FpiDeviceValidity *self,
   fpi_usb_transfer_fill_interrupt (transfer, VALIDITY_EP_INT_IN,
                                    VALIDITY_USB_INT_DATA_SIZE);
   /* Use no timeout (0) for finger-wait and scan-complete states,
-   * since these wait for physical user interaction.
-   * The interrupt_cancellable handles cancellation. */
+   * since these wait for physical user interaction. The action's
+   * GCancellable (fpi_device_get_cancellable) aborts the wait on cancel. */
   fpi_usb_transfer_submit (transfer, 0,
-                           self->interrupt_cancellable,
+                           fpi_device_get_cancellable (FP_DEVICE (self)),
                            verify_interrupt_cb, ssm);
 }
 
@@ -917,8 +917,15 @@ list_get_user_recv (FpiSsm            *ssm,
                     {
                       g_autofree gchar *uuid =
                         g_strndup ((const gchar *) uuid_bytes, id_len);
-                      g_object_set (print, "fpi-data",
-                                    g_variant_new_string (uuid), NULL);
+                      /* The UUID comes straight off the device. g_variant_new_string
+                       * aborts (g_critical) on non-UTF-8 input, so validate first;
+                       * a print with unset fpi-data simply won't match, which is the
+                       * right outcome for a garbage record. */
+                      if (g_utf8_validate (uuid, -1, NULL))
+                        g_object_set (print, "fpi-data",
+                                      g_variant_new_string (uuid), NULL);
+                      else
+                        fp_warn ("Skipping non-UTF-8 identity in stored print");
                     }
                 }
 

@@ -251,7 +251,6 @@ struct _FpiDeviceValidity
 
   ValidityDeviceType  dev_type;
   ValidityVersionInfo version_info;
-  GCancellable       *interrupt_cancellable;
 
   /* Runtime data files loaded from libfprint-validity-data package */
   ValidityDataStore device_data;
@@ -285,6 +284,7 @@ struct _FpiDeviceValidity
   guint16 enroll_storage_dbid;
   guint   scan_incomplete_count;
   gboolean enroll_frame_rejected;   /* sensor rejected the last frame (0x0526) — retry stage */
+  guint   enroll_reject_retries;    /* cumulative 0x0526 retries — bounds broken-firmware loops */
 
   /* Verify: retry state for empty/phantom captures (no finger down) */
   guint    verify_capture_retries;

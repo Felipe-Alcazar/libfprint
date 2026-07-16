@@ -41,6 +41,11 @@
 #include "validity.h"
 #include "vcsfw_protocol.h"
 
+/* Upper bound on consecutive 0x0526 (frame-rejected) retries before giving up,
+ * so broken or hostile firmware that rejects every frame cannot loop forever.
+ * Generous: a real enrollment never rejects anywhere near this many frames. */
+#define VALIDITY_ENROLL_MAX_REJECTS 30
+
 /* ================================================================
  * Interrupt helpers — read from EP 0x83
  * ================================================================ */
@@ -185,7 +190,7 @@ read_again:
     /* 30s timeout for scan_complete; unlimited for finger-down */
     fpi_usb_transfer_submit (new_transfer,
                              (target_state == 3) ? 30000 : 0,
-                             self->interrupt_cancellable,
+                             fpi_device_get_cancellable (FP_DEVICE (self)),
                              interrupt_cb, ssm);
   }
 }
@@ -205,7 +210,7 @@ start_interrupt_wait (FpiDeviceValidity *self,
   fpi_usb_transfer_fill_interrupt (transfer, VALIDITY_EP_INT_IN,
                                    VALIDITY_USB_INT_DATA_SIZE);
   fpi_usb_transfer_submit (transfer, 0,
-                           self->interrupt_cancellable,
+                           fpi_device_get_cancellable (FP_DEVICE (self)),
                            interrupt_cb, ssm);
 }
 
@@ -222,11 +227,17 @@ update_interrupt_cb (FpiUsbTransfer *transfer,
   if (error)
     {
       if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        fpi_ssm_mark_failed (ssm,
-                             fpi_device_error_new (FP_DEVICE_ERROR_REMOVED));
+        {
+          g_clear_error (&error);
+          fpi_ssm_mark_failed (ssm,
+                               fpi_device_error_new (FP_DEVICE_ERROR_REMOVED));
+        }
       else
-        fpi_ssm_mark_failed (ssm, error);
-      g_clear_error (&error);
+        {
+          /* fpi_ssm_mark_failed takes ownership of the error (and here
+           * synchronously frees the SSM); do not free it again. */
+          fpi_ssm_mark_failed (ssm, g_steal_pointer (&error));
+        }
       return;
     }
 
@@ -346,6 +357,7 @@ enroll_cleanup_stale (FpiSsm            *ssm,
   self->enroll_stage = 0;
   self->scan_incomplete_count = 0;
   self->enroll_frame_rejected = FALSE;
+  self->enroll_reject_retries = 0;
   g_clear_pointer (&self->enroll_template, g_free);
   self->enroll_template_len = 0;
   vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
@@ -483,7 +495,7 @@ enroll_wait_scan_complete (FpiSsm            *ssm,
   fpi_usb_transfer_fill_interrupt (transfer, VALIDITY_EP_INT_IN,
                                    VALIDITY_USB_INT_DATA_SIZE);
   fpi_usb_transfer_submit (transfer, 30000,
-                           self->interrupt_cancellable,
+                           fpi_device_get_cancellable (FP_DEVICE (self)),
                            interrupt_cb, ssm);
 }
 
@@ -535,7 +547,7 @@ enroll_wait_update_start_int (FpiSsm            *ssm,
   fpi_usb_transfer_fill_interrupt (transfer, VALIDITY_EP_INT_IN,
                                    VALIDITY_USB_INT_DATA_SIZE);
   fpi_usb_transfer_submit (transfer, 0,
-                           self->interrupt_cancellable,
+                           fpi_device_get_cancellable (FP_DEVICE (self)),
                            update_interrupt_cb, ssm);
 }
 
@@ -572,7 +584,7 @@ enroll_wait_update_int (FpiSsm            *ssm,
   fpi_usb_transfer_fill_interrupt (transfer, VALIDITY_EP_INT_IN,
                                    VALIDITY_USB_INT_DATA_SIZE);
   fpi_usb_transfer_submit (transfer, 0,
-                           self->interrupt_cancellable,
+                           fpi_device_get_cancellable (FP_DEVICE (self)),
                            update_interrupt_cb, ssm);
 }
 
@@ -653,10 +665,24 @@ enroll_loop_check (FpiSsm            *ssm,
   FpDevice *dev = FP_DEVICE (self);
 
   /* The sensor rejected the last frame (0x0526): report a retry and re-capture
-   * the SAME stage without advancing progress, instead of failing the enroll. */
+   * the SAME stage without advancing progress, instead of failing the enroll.
+   * This path deliberately skips the enroll_stage increment (and its upper
+   * bound), so it needs its own cap: without one a device that returns 0x0526
+   * on every frame would loop forever. A cancel still interrupts it, because
+   * the next finger-wait is submitted on the action's GCancellable. */
   if (self->enroll_frame_rejected)
     {
       self->enroll_frame_rejected = FALSE;
+
+      if (++self->enroll_reject_retries > VALIDITY_ENROLL_MAX_REJECTS)
+        {
+          fp_warn ("Enrollment rejected %u frames — aborting",
+                   self->enroll_reject_retries);
+          fpi_ssm_mark_failed (ssm,
+                               fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
+          return;
+        }
+
       fpi_device_enroll_progress (
         dev, self->enroll_stage, NULL,
         fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
@@ -886,7 +912,7 @@ enroll_wait_finger_int (FpiSsm            *ssm,
   fpi_usb_transfer_fill_interrupt (transfer, VALIDITY_EP_INT_IN,
                                    VALIDITY_USB_INT_DATA_SIZE);
   fpi_usb_transfer_submit (transfer, 5000,
-                           self->interrupt_cancellable,
+                           fpi_device_get_cancellable (FP_DEVICE (self)),
                            update_interrupt_cb, ssm);
 }
 
