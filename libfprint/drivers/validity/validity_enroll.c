@@ -560,12 +560,18 @@ enroll_append_image_recv (FpiSsm            *ssm,
    * The actual result comes from the second call after the interrupt. */
   if (self->cmd_response_status != VCSFW_STATUS_OK)
     {
-      fp_warn ("enrollment_update (trigger) non-OK: status=0x%04x — skip to update_end",
+      fp_info ("enrollment_update (trigger) rejected (0x%04x) -- cleanup and retry",
                self->cmd_response_status);
-      /* Don't fail — firmware may be rejecting this iteration.
-       * Skip remaining enrollment_update states and go to UPDATE_END,
-       * which will proceed to LOOP_CHECK and retry or exit. */
-      fpi_ssm_jump_to_state (ssm, ENROLL_UPDATE_END);
+      /* Firmware rejected this frame (e.g. 0x0526). Do NOT skip straight to
+       * update-end: python-validity commits call_cleanups in a finally even on
+       * a rejected frame, and skipping it wedges the 06cb:00cb silicon (the chip
+       * can drop off the bus mid-enroll). Mark the frame rejected and fall
+       * through to ENROLL_CLEANUPS; ENROLL_CLEANUPS_RECV then jumps to
+       * ENROLL_UPDATE_END -- skipping the wait-int and second update, which
+       * python also skips once the first enrollment_update raised -- and
+       * LOOP_CHECK retries the stage. */
+      self->enroll_frame_rejected = TRUE;
+      fpi_ssm_next_state (ssm);
       return;
     }
   fpi_ssm_next_state (ssm);
@@ -1125,7 +1131,13 @@ enroll_run_state (FpiSsm   *ssm,
           self->cmd_response_status != 0x0491)
         fp_warn ("call_cleanups (1st) failed: status=0x%04x",
                  self->cmd_response_status);
-      fpi_ssm_next_state (ssm);
+      /* If the trigger enrollment_update was rejected, cleanups have now run
+       * (matching python's finally); skip the wait-int and second update and go
+       * straight to update-end so LOOP_CHECK retries this stage. */
+      if (self->enroll_frame_rejected)
+        fpi_ssm_jump_to_state (ssm, ENROLL_UPDATE_END);
+      else
+        fpi_ssm_next_state (ssm);
       break;
 
     case ENROLL_WAIT_UPDATE_INT:
