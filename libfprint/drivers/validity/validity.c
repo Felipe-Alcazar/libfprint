@@ -899,20 +899,20 @@ open_sensor_identify_recv (FpiSsm            *ssm,
         self->sensor.device_info->type);
 
       /* Pick the true silicon type for the finger-down interrupt path, which
-       * keys off the real type. FM-154/FM-3439 units are 0x969 silicon that
-       * can report the 0x199 profile alias; key off the stable device name so
-       * the type-3-as-finger-down handling is not bypassed. Genuine 0x199 chips
-       * (FM-3367, FM-155, FM-3380) do not match and keep their type. The model
-       * string appears both with and without a space after "FM-" ("FM- 154" vs
-       * "FM-154"), so match both. Mirrors python-validity Sensor.open(). */
+       * keys off the real type. FM-154/FM-3439 units are 0x969 silicon exposed
+       * under the 0x199 profile alias; key off the stable device name so the
+       * type-3-as-finger-down handling is not bypassed. Genuine 0x199 chips
+       * (FM-3367, FM-155, FM-3380) do not match and keep their type. The name
+       * comes from device_info_table, which spells this family "FM-154" and
+       * "FM-3439" (python-validity keys off the sensor's own string, spaced as
+       * "FM- 154"; here we match our table's unspaced spelling). */
       self->sensor.real_sensor_type = self->sensor.device_info->type;
       if (self->sensor.device_info->type == 0x0199)
         {
           const gchar *name = self->sensor.device_info->name;
 
           if (g_strstr_len (name, -1, "FM-3439") ||
-              g_strstr_len (name, -1, "FM-154") ||
-              g_strstr_len (name, -1, "FM- 154"))
+              g_strstr_len (name, -1, "FM-154"))
             {
               fp_info ("Sensor %s reports type 0x199, treating as 0x969", name);
               self->sensor.real_sensor_type = 0x0969;

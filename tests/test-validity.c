@@ -2341,7 +2341,7 @@ test_build_identity_null (void)
    * so we must expect the message. */
   g_test_expect_message ("libfprint-validity",
                          G_LOG_LEVEL_CRITICAL,
-                         "*assertion*uuid_str*failed*");
+                         "*assertion*id_str*failed*");
 
   guint8 *id = validity_db_build_identity (NULL, &len);
   g_test_assert_expected_messages ();

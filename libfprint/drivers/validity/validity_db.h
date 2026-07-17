@@ -219,9 +219,9 @@ gboolean validity_db_parse_new_record_id (const guint8 *data,
  * Identity helpers
  * ================================================================ */
 
-/* Build a UUID-based identity suitable for the sensor DB.
+/* Build an identity blob from an id string, suitable for the sensor DB.
  * Returns a buffer of at least VALIDITY_IDENTITY_MIN_SIZE bytes. */
-guint8 *validity_db_build_identity (const gchar *uuid_str,
+guint8 *validity_db_build_identity (const gchar *id_str,
                                     gsize       *out_len);
 
 /* Build finger data payload for new_finger (format from make_finger_data) */

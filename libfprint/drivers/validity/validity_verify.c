@@ -901,31 +901,31 @@ list_get_user_recv (FpiSsm            *ssm,
               if (finger >= 0)
                 fp_print_set_finger (print, (FpFinger) finger);
 
-              /* Set fpi-data to the identity UUID string, matching what
+              /* Set fpi-data to the identity id string, matching what
                * enroll stores (g_variant_new_string(user_id)), so the print
                * serialises and fp_print_equal() can match it against a saved
-               * print. Identity blob: type(4LE) | len(4LE) | UUID[len]. */
+               * print. Identity blob: type(4LE) | len(4LE) | id_bytes[len]. */
               if (user.identity && user.identity_len >= 8)
                 {
                   FpiByteReader idr;
                   guint32 id_type = 0, id_len = 0;
-                  const guint8 *uuid_bytes = NULL;
+                  const guint8 *id_bytes = NULL;
 
                   fpi_byte_reader_init (&idr, user.identity, user.identity_len);
                   if (fpi_byte_reader_get_uint32_le (&idr, &id_type) &&
                       fpi_byte_reader_get_uint32_le (&idr, &id_len) &&
                       id_len > 0 &&
-                      fpi_byte_reader_get_data (&idr, id_len, &uuid_bytes))
+                      fpi_byte_reader_get_data (&idr, id_len, &id_bytes))
                     {
-                      g_autofree gchar *uuid =
-                        g_strndup ((const gchar *) uuid_bytes, id_len);
-                      /* The UUID comes straight off the device. g_variant_new_string
+                      g_autofree gchar *id =
+                        g_strndup ((const gchar *) id_bytes, id_len);
+                      /* The id comes straight off the device. g_variant_new_string
                        * aborts (g_critical) on non-UTF-8 input, so validate first;
                        * a print with unset fpi-data simply won't match, which is the
                        * right outcome for a garbage record. */
-                      if (g_utf8_validate (uuid, -1, NULL))
+                      if (g_utf8_validate (id, -1, NULL))
                         g_object_set (print, "fpi-data",
-                                      g_variant_new_string (uuid), NULL);
+                                      g_variant_new_string (id), NULL);
                       else
                         fp_warn ("Skipping non-UTF-8 identity in stored print");
                     }

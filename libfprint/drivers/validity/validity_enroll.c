@@ -726,8 +726,9 @@ enroll_create_user (FpiSsm            *ssm,
   fpi_device_get_enroll_data (dev, &print);
 
   /* Derive the enrollment id with the shared helper, as the other
-   * match-on-chip drivers do. fprintd deletes an existing finger before
-   * re-enrolling it, so a fresh id per enrollment is fine. */
+   * match-on-chip drivers do (e.g. synaptics). Each enrollment gets a fresh
+   * id; the upper layer removes an existing finger before re-enrolling it, so
+   * a new on-chip record per enrollment does not accumulate stale ones. */
   g_autofree gchar *user_id = fpi_print_generate_user_id (print);
 
   identity = validity_db_build_identity (user_id, &identity_len);

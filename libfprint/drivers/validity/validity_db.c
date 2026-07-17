@@ -476,32 +476,32 @@ validity_db_parse_new_record_id (const guint8 *data,
  * Identity helpers
  * ================================================================ */
 
-/* Build a UUID-based identity for the sensor DB.
+/* Build an identity blob from an id string for the sensor DB.
  *
- * python-validity uses Windows SIDs. For libfprint we use a UUID
- * encoded as a type-3 (SID-type) identity with zero-padding to
- * the Windows union minimum size of 0x4C bytes.
+ * python-validity uses Windows SIDs. For libfprint we store the print's
+ * generated id string, encoded as a type-3 (SID-type) identity with
+ * zero-padding to the Windows union minimum size of 0x4C bytes.
  *
- * Format: type(4LE) | len(4LE) | uuid_bytes(len) | padding */
+ * Format: type(4LE) | len(4LE) | id_bytes(len) | padding */
 guint8 *
-validity_db_build_identity (const gchar *uuid_str,
+validity_db_build_identity (const gchar *id_str,
                             gsize       *out_len)
 {
   FpiByteWriter writer;
-  gsize uuid_len;
+  gsize id_len;
   gsize payload_len;
   gsize total_len;
 
-  g_return_val_if_fail (uuid_str != NULL, NULL);
+  g_return_val_if_fail (id_str != NULL, NULL);
 
-  uuid_len = strlen (uuid_str);
-  payload_len = 4 + 4 + uuid_len;
+  id_len = strlen (id_str);
+  payload_len = 4 + 4 + id_len;
   total_len = MAX (payload_len, VALIDITY_IDENTITY_MIN_SIZE);
 
   fpi_byte_writer_init_with_size (&writer, total_len, FALSE);
   fpi_byte_writer_put_uint32_le (&writer, VALIDITY_IDENTITY_TYPE_SID);
-  fpi_byte_writer_put_uint32_le (&writer, uuid_len);
-  fpi_byte_writer_put_data (&writer, (const guint8 *) uuid_str, uuid_len);
+  fpi_byte_writer_put_uint32_le (&writer, id_len);
+  fpi_byte_writer_put_data (&writer, (const guint8 *) id_str, id_len);
   /* Pad to minimum identity size */
   if (total_len > payload_len)
     fpi_byte_writer_fill (&writer, 0, total_len - payload_len);
