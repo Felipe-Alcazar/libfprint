@@ -365,23 +365,6 @@ enroll_cleanup_stale (FpiSsm            *ssm,
 }
 
 static void
-enroll_pre_get_storage_recv (FpiSsm            *ssm,
-                             FpiDeviceValidity *self)
-{
-  validity_user_storage_clear (&self->list_storage);
-
-  /* Do NOT delete existing users here. Each enrolled finger is stored as its
-   * own on-chip user record, so deleting every user before an enroll wiped
-   * ALL previously enrolled fingers -- enrolling a second finger destroyed the
-   * first. (Single-finger testing never exposed this.) Enroll now simply adds
-   * a new user+finger and preserves the others; fprintd removes a specific
-   * finger through the delete vfunc when the user deletes or re-enrolls it,
-   * mirroring python-validity, which likewise keeps other fingers and only
-   * clears a same-finger re-enrollment. */
-  fpi_ssm_jump_to_state (ssm, ENROLL_START);
-}
-
-static void
 enroll_led_on_recv (FpiSsm            *ssm,
                     FpiDeviceValidity *self)
 {
@@ -897,22 +880,11 @@ enroll_run_state (FpiSsm   *ssm,
       break;
 
     case ENROLL_CLEANUP_STALE_RECV:
-      /* Ignore status — no active session is fine (0x0405, etc.) */
+      /* Ignore status -- no active session is fine (0x0405, etc.). Enroll adds
+       * a new user+finger record and leaves any other enrolled fingers intact
+       * (each finger is its own on-chip user record); fprintd deletes a finger
+       * through the delete vfunc. */
       fpi_ssm_next_state (ssm);
-      break;
-
-    case ENROLL_PRE_GET_STORAGE:
-      {
-        gsize cmd_len;
-        guint8 *cmd = validity_db_build_cmd_get_user_storage (
-          VALIDITY_STORAGE_NAME, &cmd_len);
-        vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
-        g_free (cmd);
-      }
-      break;
-
-    case ENROLL_PRE_GET_STORAGE_RECV:
-      enroll_pre_get_storage_recv (ssm, self);
       break;
 
     case ENROLL_START:
