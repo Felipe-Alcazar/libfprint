@@ -715,11 +715,9 @@ enroll_create_user (FpiSsm            *ssm,
 {
   FpDevice *dev = FP_DEVICE (self);
 
-  /* Create user with UUID identity via cmd 0x47 (new_record).
+  /* Create the user record via cmd 0x47 (new_record).
    * python-validity: usr = db.new_user(identity)
-   * → new_record(stg.dbid, 5, stg.dbid, identity_to_bytes(identity))
-   *
-   * We generate a UUID for the user identity. */
+   * -> new_record(stg.dbid, 5, stg.dbid, identity_to_bytes(identity)) */
 
   FpPrint *print = NULL;
   g_autofree guint8 *identity = NULL;
@@ -727,9 +725,10 @@ enroll_create_user (FpiSsm            *ssm,
 
   fpi_device_get_enroll_data (dev, &print);
 
-  /* Generate a UUID string for this enrollment.
-   * Use g_uuid_string_random() for a unique per-enrollment identity. */
-  g_autofree gchar *user_id = g_uuid_string_random ();
+  /* Derive the enrollment id with the shared helper, as the other
+   * match-on-chip drivers do. fprintd deletes an existing finger before
+   * re-enrolling it, so a fresh id per enrollment is fine. */
+  g_autofree gchar *user_id = fpi_print_generate_user_id (print);
 
   identity = validity_db_build_identity (user_id, &identity_len);
   if (!identity)
