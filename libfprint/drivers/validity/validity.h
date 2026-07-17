@@ -113,11 +113,9 @@ typedef enum {
 typedef enum {
   ENROLL_CLEANUP_STALE = 0,    /* Close any stale enrollment session */
   ENROLL_CLEANUP_STALE_RECV,
-  /* Pre-enrollment: delete existing user records to avoid 0x0526 */
+  /* Pre-enrollment storage probe; enroll preserves other fingers (no delete) */
   ENROLL_PRE_GET_STORAGE,
   ENROLL_PRE_GET_STORAGE_RECV,
-  ENROLL_PRE_DEL_USER,
-  ENROLL_PRE_DEL_USER_RECV,
   ENROLL_START,                /* create_enrollment (cmd 0x69 flag=1) */
   ENROLL_START_RECV,
   /* --- Per-iteration loop --- */

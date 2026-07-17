@@ -370,61 +370,15 @@ enroll_pre_get_storage_recv (FpiSsm            *ssm,
 {
   validity_user_storage_clear (&self->list_storage);
 
-  if (self->cmd_response_status != VCSFW_STATUS_OK ||
-      !self->cmd_response_data ||
-      !validity_db_parse_user_storage (self->cmd_response_data,
-                                       self->cmd_response_len,
-                                       &self->list_storage))
-    {
-      /* No storage or parse error — skip cleanup, go to enrollment */
-      fpi_ssm_jump_to_state (ssm, ENROLL_START);
-      return;
-    }
-
-  if (self->list_storage.user_count == 0)
-    {
-      fp_dbg ("No existing users — skipping pre-enrollment cleanup");
-      fpi_ssm_jump_to_state (ssm, ENROLL_START);
-      return;
-    }
-
-  fp_info ("Pre-enrollment cleanup: deleting %u existing user(s)",
-           self->list_storage.user_count);
-  self->list_user_idx = 0;
-  fpi_ssm_next_state (ssm);
-}
-
-static void
-enroll_pre_del_user (FpiSsm            *ssm,
-                     FpiDeviceValidity *self)
-{
-  if (self->list_user_idx >= self->list_storage.user_count)
-    {
-      fp_info ("Pre-enrollment cleanup done");
-      validity_user_storage_clear (&self->list_storage);
-      fpi_ssm_jump_to_state (ssm, ENROLL_START);
-      return;
-    }
-
-  guint16 user_dbid = self->list_storage.user_dbids[self->list_user_idx];
-  gsize cmd_len;
-  guint8 *cmd = validity_db_build_cmd_del_record (user_dbid, &cmd_len);
-  fp_info ("Deleting user record dbid=%u", user_dbid);
-  vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
-  g_free (cmd);
-}
-
-static void
-enroll_pre_del_user_recv (FpiSsm            *ssm,
-                          FpiDeviceValidity *self)
-{
-  if (self->cmd_response_status != VCSFW_STATUS_OK)
-    fp_warn ("Pre-enrollment del_record(dbid=%u) failed: status=0x%04x",
-             self->list_storage.user_dbids[self->list_user_idx],
-             self->cmd_response_status);
-
-  self->list_user_idx++;
-  fpi_ssm_jump_to_state (ssm, ENROLL_PRE_DEL_USER);
+  /* Do NOT delete existing users here. Each enrolled finger is stored as its
+   * own on-chip user record, so deleting every user before an enroll wiped
+   * ALL previously enrolled fingers -- enrolling a second finger destroyed the
+   * first. (Single-finger testing never exposed this.) Enroll now simply adds
+   * a new user+finger and preserves the others; fprintd removes a specific
+   * finger through the delete vfunc when the user deletes or re-enrolls it,
+   * mirroring python-validity, which likewise keeps other fingers and only
+   * clears a same-finger re-enrollment. */
+  fpi_ssm_jump_to_state (ssm, ENROLL_START);
 }
 
 static void
@@ -959,14 +913,6 @@ enroll_run_state (FpiSsm   *ssm,
 
     case ENROLL_PRE_GET_STORAGE_RECV:
       enroll_pre_get_storage_recv (ssm, self);
-      break;
-
-    case ENROLL_PRE_DEL_USER:
-      enroll_pre_del_user (ssm, self);
-      break;
-
-    case ENROLL_PRE_DEL_USER_RECV:
-      enroll_pre_del_user_recv (ssm, self);
       break;
 
     case ENROLL_START:
