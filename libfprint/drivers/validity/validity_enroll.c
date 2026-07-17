@@ -596,14 +596,22 @@ enroll_append_image_read_recv (FpiSsm            *ssm,
     {
       /* Status 0x0526 = the sensor rejected this frame (typically a
        * near-duplicate from a finger that wasn't lifted between stages).
-       * Not fatal: close the enrollment session (ENROLL_UPDATE_END) and let
-       * the loop re-capture this stage, reporting a retry to the user -- this
-       * mirrors python-validity's enroll loop, which retries on any bad frame. */
+       * Not fatal: let the loop re-capture this stage, reporting a retry to
+       * the user -- this mirrors python-validity's enroll loop, which retries
+       * on any bad frame.
+       *
+       * Critically, still run call_cleanups (ENROLL_CLEANUPS_READ) before
+       * ENROLL_UPDATE_END rather than jumping past it: python-validity commits
+       * cleanups in a `finally`, so they run even when the frame is rejected.
+       * Skipping them wedges the 06cb:00cb silicon -- the *next* stage's
+       * enrollment_update (cmd 0x6b) bulk-OUT then times out, because pending
+       * writes were never committed. 138a:00ab tolerates the skip; 06cb does
+       * not. Fall through to the cleanups state to match python. */
       if (self->cmd_response_status == 0x0526)
         {
           fp_info ("enrollment_update rejected the frame (0x0526) -- retrying stage");
           self->enroll_frame_rejected = TRUE;
-          fpi_ssm_jump_to_state (ssm, ENROLL_UPDATE_END);
+          fpi_ssm_next_state (ssm);
           return;
         }
       fp_warn ("enrollment_update (read) failed: status=0x%04x",
