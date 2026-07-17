@@ -898,35 +898,23 @@ open_sensor_identify_recv (FpiSsm            *ssm,
       self->sensor.type_info = validity_sensor_type_info_lookup (
         self->sensor.device_info->type);
 
-      /* Determine the true silicon type for finger-down interrupt handling.
-       * FM-154/FM-3439 sensors are 0x969 silicon, but after suspend/resume
-       * they re-enumerate reporting sensor type 0x199 directly rather than
-       * 0x969. Left unhandled, the type-3-as-finger-down path (which keys off
-       * the real type) would be bypassed and verify/enroll would hang waiting
-       * for a type-2 interrupt this silicon never emits. The device name is
-       * stable across boot and resume, so key off it: FM-3439-xxx and
-       * FM-154-xxx are the known 0x969 model families. Genuine 0x199 chips
-       * (FM-3367, FM-155, FM-3380) do not match either pattern and keep their
-       * real type. Mirrors python-validity Sensor.open().
-       *
-       * The model string carries a space after "FM-" on some units
-       * ("57K0 FM- 154-123") but not others ("57K0 FM-154-123"); strip spaces
-       * before matching so both spellings are recognised (python-validity keys
-       * off the spaced form only and would miss the unspaced one, and vice
-       * versa). */
+      /* Pick the true silicon type for the finger-down interrupt path, which
+       * keys off the real type. FM-154/FM-3439 units are 0x969 silicon that
+       * can report the 0x199 profile alias; key off the stable device name so
+       * the type-3-as-finger-down handling is not bypassed. Genuine 0x199 chips
+       * (FM-3367, FM-155, FM-3380) do not match and keep their type. The model
+       * string appears both with and without a space after "FM-" ("FM- 154" vs
+       * "FM-154"), so match both. Mirrors python-validity Sensor.open(). */
       self->sensor.real_sensor_type = self->sensor.device_info->type;
-      if (self->sensor.device_info->type == 0x0199 &&
-          self->sensor.device_info->name != NULL)
+      if (self->sensor.device_info->type == 0x0199)
         {
-          g_auto(GStrv) name_parts =
-            g_strsplit (self->sensor.device_info->name, " ", -1);
-          g_autofree gchar *name_compact = g_strjoinv ("", name_parts);
+          const gchar *name = self->sensor.device_info->name;
 
-          if (g_strstr_len (name_compact, -1, "FM-3439") ||
-              g_strstr_len (name_compact, -1, "FM-154"))
+          if (g_strstr_len (name, -1, "FM-3439") ||
+              g_strstr_len (name, -1, "FM-154") ||
+              g_strstr_len (name, -1, "FM- 154"))
             {
-              fp_info ("Sensor %s reporting type 0x199 (post-resume), treating as 0x969",
-                       self->sensor.device_info->name);
+              fp_info ("Sensor %s reports type 0x199, treating as 0x969", name);
               self->sensor.real_sensor_type = 0x0969;
             }
         }
