@@ -2556,6 +2556,51 @@ test_delete_states_exist (void)
 }
 
 /* ================================================================
+ * Tier 0 recovery: error classification (validity_classify_error)
+ * ================================================================ */
+static void
+test_classify_error (void)
+{
+  GError *e;
+
+  /* No error */
+  g_assert_cmpint (validity_classify_error (NULL, TRUE), ==, VALIDITY_ERR_NONE);
+  g_assert_cmpint (validity_classify_error (NULL, FALSE), ==, VALIDITY_ERR_NONE);
+
+  /* Cancellation (either domain) -- never recover */
+  e = g_error_new (G_IO_ERROR, G_IO_ERROR_CANCELLED, "x");
+  g_assert_cmpint (validity_classify_error (e, TRUE), ==, VALIDITY_ERR_CANCELLED);
+  g_error_free (e);
+  e = g_error_new (G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_CANCELLED, "x");
+  g_assert_cmpint (validity_classify_error (e, TRUE), ==, VALIDITY_ERR_CANCELLED);
+  g_error_free (e);
+
+  /* Already-mapped removed */
+  e = g_error_new (FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED, "x");
+  g_assert_cmpint (validity_classify_error (e, TRUE), ==, VALIDITY_ERR_REMOVED);
+  g_error_free (e);
+
+  /* NO_DEVICE: liveness decides session-lost (alive) vs removed (gone) */
+  e = g_error_new (G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_NO_DEVICE, "x");
+  g_assert_cmpint (validity_classify_error (e, TRUE), ==, VALIDITY_ERR_SESSION_LOST);
+  g_assert_cmpint (validity_classify_error (e, FALSE), ==, VALIDITY_ERR_REMOVED);
+  g_error_free (e);
+
+  /* Transient transport blips -> pipe stall */
+  e = g_error_new (G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_IO, "x");
+  g_assert_cmpint (validity_classify_error (e, TRUE), ==, VALIDITY_ERR_PIPE_STALL);
+  g_error_free (e);
+  e = g_error_new (G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_TIMED_OUT, "x");
+  g_assert_cmpint (validity_classify_error (e, TRUE), ==, VALIDITY_ERR_PIPE_STALL);
+  g_error_free (e);
+
+  /* Anything else -> fatal (incl. a plain PROTO, until TLS-alert detection) */
+  e = g_error_new (FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO, "x");
+  g_assert_cmpint (validity_classify_error (e, TRUE), ==, VALIDITY_ERR_FATAL);
+  g_error_free (e);
+}
+
+/* ================================================================
  * R1f: match_result_clear frees hash
  *
  * Ensure the clear function properly frees the hash allocation.
@@ -5559,6 +5604,10 @@ main (int argc, char *argv[])
                    test_clear_storage_states_exist);
   g_test_add_func ("/validity/verify/delete_states",
                    test_delete_states_exist);
+
+  /* Tier 0 recovery: error classification */
+  g_test_add_func ("/validity/recovery/classify_error",
+                   test_classify_error);
 
 
   /* TLS tests */

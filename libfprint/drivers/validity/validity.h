@@ -337,6 +337,29 @@ gboolean parse_enrollment_update_response (const guint8           *data,
                                            gsize                   data_len,
                                            EnrollmentUpdateResult *result);
 
+/* Error classification for in-driver recovery ("Tier 0": reconnect and retry
+ * inside the driver, with no libfprint core changes). Tier 0 covers a sensor
+ * reset that leaves the device on the bus; a true re-enumeration still
+ * reports FP_DEVICE_ERROR_REMOVED, since recovering from it needs core
+ * support (proposed in libfprint issue #852,
+ * https://gitlab.freedesktop.org/libfprint/libfprint/-/issues/852).
+ *
+ * Maps a transport/protocol error to a recovery class. Pure and side-effect
+ * free: for the ambiguous NO_DEVICE case the caller supplies @device_alive
+ * from a liveness probe -- TRUE when the sensor still answers on the bus (a
+ * reset that dropped the TLS session) vs FALSE when it truly re-enumerated. */
+typedef enum {
+  VALIDITY_ERR_NONE = 0,       /* @error was NULL -- no error */
+  VALIDITY_ERR_CANCELLED,      /* user/action cancellation -- do not recover */
+  VALIDITY_ERR_PIPE_STALL,     /* transport blip, device still on the bus */
+  VALIDITY_ERR_SESSION_LOST,   /* sensor reset: reconnect + restart the op */
+  VALIDITY_ERR_REMOVED,        /* device gone (re-enumeration) -- REMOVED */
+  VALIDITY_ERR_FATAL,          /* not recoverable -- abort with the error */
+} ValidityErrClass;
+
+ValidityErrClass validity_classify_error (const GError *error,
+                                          gboolean      device_alive);
+
 /* Verify/Identify SSMs (validity_verify.c) */
 /* Map a USB "no device" error (intermittent re-enumeration) to
  * FP_DEVICE_ERROR_REMOVED. Takes ownership of @error, returns the result. */

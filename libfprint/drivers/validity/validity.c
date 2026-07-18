@@ -61,6 +61,35 @@ validity_map_removed_error (GError *error)
   return error;
 }
 
+/* Classify a transport/protocol error into a recovery class. See the header.
+ * This only maps the signals distinguishable today; the TLS-alert ->
+ * SESSION_LOST refinement lands with the recovery wiring, so a chip-reset TLS
+ * alert currently classifies as FATAL (aborts, as before). */
+ValidityErrClass
+validity_classify_error (const GError *error,
+                         gboolean      device_alive)
+{
+  if (error == NULL)
+    return VALIDITY_ERR_NONE;
+
+  if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ||
+      g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_CANCELLED))
+    return VALIDITY_ERR_CANCELLED;
+
+  if (g_error_matches (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_REMOVED))
+    return VALIDITY_ERR_REMOVED;
+
+  if (g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_NO_DEVICE))
+    return device_alive ? VALIDITY_ERR_SESSION_LOST : VALIDITY_ERR_REMOVED;
+
+  /* Transient transport blips where the device is still present on the bus. */
+  if (g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_IO) ||
+      g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_TIMED_OUT))
+    return VALIDITY_ERR_PIPE_STALL;
+
+  return VALIDITY_ERR_FATAL;
+}
+
 static void validity_release_state (FpiDeviceValidity *self);
 
 /* ================================================================
