@@ -318,9 +318,13 @@ struct _FpiDeviceValidity
   guint               list_user_idx;
 
   /* Delete state */
-  guint16 delete_storage_dbid;
-  guint16 delete_finger_subtype;
-  guint16 delete_finger_dbid;
+  guint16  delete_storage_dbid;
+  guint16  delete_finger_subtype;
+  guint16  delete_finger_dbid;
+  guint16  delete_total_fingers;   /* fingers tallied while scanning all users */
+  gboolean delete_found;           /* the print to delete was located */
+  gboolean delete_scan_ok;         /* every get_user during the scan succeeded */
+  gboolean delete_reclaim;         /* this delete empties the chip -> erase to reclaim */
 
   /* Command SSM: manages the send-cmd/recv-response cycle */
   FpiSsm *cmd_ssm;

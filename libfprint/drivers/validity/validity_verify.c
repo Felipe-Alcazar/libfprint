@@ -1128,16 +1128,29 @@ static void
 delete_lookup_user (FpiSsm            *ssm,
                     FpiDeviceValidity *self)
 {
-  /* Look up the user matching the print to delete.
-   * Iterate users to find one with a matching finger subtype.
+  /* Scan every user: locate the finger to delete and tally the total number of
+   * fingers on the chip, so we can tell whether this delete empties it.
    * python-validity: db.lookup_user(identity) */
   if (self->list_user_idx >= self->list_storage.user_count)
     {
-      /* No matching finger found across all users */
-      fp_info ("Delete: no matching finger (subtype=%u) found in DB",
-               self->delete_finger_subtype);
-      fpi_ssm_mark_failed (ssm,
-                           fpi_device_error_new (FP_DEVICE_ERROR_DATA_NOT_FOUND));
+      if (!self->delete_found)
+        {
+          /* No matching finger found across all users */
+          fp_info ("Delete: no matching finger (subtype=%u) found in DB",
+                   self->delete_finger_subtype);
+          fpi_ssm_mark_failed (ssm,
+                               fpi_device_error_new (FP_DEVICE_ERROR_DATA_NOT_FOUND));
+          return;
+        }
+
+      /* If the print being deleted is the only finger left on the chip,
+       * deleting it empties the DB. Flag it so delete_ssm_done erases the
+       * partition and reclaims the flash (del_record alone never compacts).
+       * Skip the reclaim if any get_user failed -- an undercount could erase a
+       * finger we simply could not read. */
+      self->delete_reclaim = (self->delete_scan_ok &&
+                              self->delete_total_fingers == 1);
+      fpi_ssm_jump_to_state (ssm, DELETE_DEL_RECORD);
       return;
     }
 
@@ -1154,7 +1167,9 @@ static void
 delete_lookup_user_recv (FpiSsm            *ssm,
                          FpiDeviceValidity *self)
 {
-  /* Parse user and look for the finger to delete */
+  /* Tally this user's fingers and, until located, look for the print to delete.
+   * We keep scanning every user (rather than stopping at the match) so that
+   * delete_total_fingers reflects the whole chip. */
   if (self->cmd_response_status == VCSFW_STATUS_OK &&
       self->cmd_response_data)
     {
@@ -1163,22 +1178,34 @@ delete_lookup_user_recv (FpiSsm            *ssm,
                                   self->cmd_response_len,
                                   &user))
         {
-          for (guint16 i = 0; i < user.finger_count; i++)
+          self->delete_total_fingers += user.finger_count;
+
+          if (!self->delete_found)
             {
-              if (user.fingers[i].subtype == self->delete_finger_subtype)
+              for (guint16 i = 0; i < user.finger_count; i++)
                 {
-                  /* Found matching finger — store dbid for deletion */
-                  self->delete_finger_dbid = user.fingers[i].dbid;
-                  validity_user_clear (&user);
-                  fpi_ssm_next_state (ssm);
-                  return;
+                  if (user.fingers[i].subtype == self->delete_finger_subtype)
+                    {
+                      /* Found matching finger — store dbid for deletion */
+                      self->delete_finger_dbid = user.fingers[i].dbid;
+                      self->delete_found = TRUE;
+                      break;
+                    }
                 }
             }
           validity_user_clear (&user);
         }
+      else
+        {
+          self->delete_scan_ok = FALSE;   /* unparseable user -- count unreliable */
+        }
+    }
+  else
+    {
+      self->delete_scan_ok = FALSE;       /* get_user failed -- count unreliable */
     }
 
-  /* Try next user — jump back to DELETE_LOOKUP_USER */
+  /* Continue scanning; delete_lookup_user decides once all users are seen. */
   self->list_user_idx++;
   fpi_ssm_jump_to_state (ssm, DELETE_LOOKUP_USER);
 }
@@ -1252,6 +1279,29 @@ delete_run_state (FpiSsm   *ssm,
     }
 }
 
+static void clear_run_state (FpiSsm   *ssm,
+                             FpDevice *dev);
+
+static void
+delete_reclaim_done (FpiSsm   *ssm,
+                     FpDevice *dev,
+                     GError   *error)
+{
+  /* The delete itself already succeeded; the erase is a best-effort reclaim,
+   * so a failure here must not fail the delete action. */
+  if (error)
+    {
+      fp_warn ("Post-delete reclaim erase failed: %s", error->message);
+      g_error_free (error);
+    }
+  else
+    {
+      fp_info ("Reclaimed DB partition flash after deleting the last print");
+    }
+
+  fpi_device_delete_complete (dev, NULL);
+}
+
 static void
 delete_ssm_done (FpiSsm   *ssm,
                  FpDevice *dev,
@@ -1260,6 +1310,23 @@ delete_ssm_done (FpiSsm   *ssm,
   FpiDeviceValidity *self = FPI_DEVICE_VALIDITY (dev);
 
   validity_user_storage_clear (&self->list_storage);
+
+  /* Deleting the last enrolled print only removes the record; the on-chip DB
+   * never compacts, so the flash stays occupied. When we just deleted the last
+   * print, erase the partition to reclaim it (same erase as clear_storage) so
+   * the user-facing "remove all prints" flow actually frees space. */
+  if (!error && self->delete_reclaim)
+    {
+      FpiSsm *erase;
+
+      self->delete_reclaim = FALSE;
+      fp_info ("Deleted the last print -- erasing DB partition to reclaim flash");
+      erase = fpi_ssm_new (dev, clear_run_state, CLEAR_NUM_STATES);
+      fpi_ssm_start (erase, delete_reclaim_done);
+      return;
+    }
+
+  self->delete_reclaim = FALSE;
   fpi_device_delete_complete (dev, validity_map_removed_error (error));
 }
 
@@ -1277,6 +1344,10 @@ validity_delete (FpDevice *device)
       return;
     }
 
+  self->delete_reclaim = FALSE;
+  self->delete_total_fingers = 0;
+  self->delete_found = FALSE;
+  self->delete_scan_ok = TRUE;
   ssm = fpi_ssm_new (device, delete_run_state, DELETE_NUM_STATES);
   fpi_ssm_start (ssm, delete_ssm_done);
 }
