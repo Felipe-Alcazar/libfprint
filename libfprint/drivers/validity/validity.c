@@ -1348,6 +1348,115 @@ open_ssm_done (FpiSsm   *ssm,
   fpi_device_open_complete (dev, NULL);
 }
 
+/* ================================================================
+ * Tier 0 in-driver recovery
+ *
+ * Recovery inside the driver, with no libfprint core changes, from a sensor
+ * reset that drops the TLS session but leaves the device on the bus: re-run
+ * the open sequence on the same GUsbDevice. The TLS session, any on-chip
+ * enroll or match session and the calibration do not survive the reset, so
+ * the open sequence re-reads the keys from flash, redoes the handshake and
+ * recalibrates, and an interrupted operation restarts from its beginning
+ * rather than resuming. A true re-enumeration leaves a dead GUsbDevice and
+ * still reports FP_DEVICE_ERROR_REMOVED; recovering from that needs core
+ * support, proposed in libfprint issue #852:
+ * https://gitlab.freedesktop.org/libfprint/libfprint/-/issues/852
+ * ================================================================ */
+
+gboolean
+validity_probe_alive (FpiDeviceValidity *self)
+{
+  GUsbDevice *usb = fpi_device_get_usb_device (FP_DEVICE (self));
+
+  g_autoptr(GError) error = NULL;
+
+  if (usb == NULL)
+    return FALSE;
+
+  /* A live device answers a GET_CONFIGURATION control request; one that has
+   * left the bus errors (NO_DEVICE). */
+  g_usb_device_get_configuration (usb, &error);
+  return error == NULL;
+}
+
+static void
+reconnect_ssm_done (FpiSsm   *ssm,
+                    FpDevice *dev,
+                    GError   *error)
+{
+  FpiDeviceValidity *self = FPI_DEVICE_VALIDITY (dev);
+  ValidityReconnectCb cb = self->reconnect_cb;
+  gpointer cb_data = self->reconnect_cb_data;
+  gboolean ok = (error == NULL);
+
+  self->cmd_ssm = NULL;
+  self->in_recovery = FALSE;
+  self->reconnect_cb = NULL;
+  self->reconnect_cb_data = NULL;
+
+  if (error)
+    {
+      fp_warn ("Reconnect failed: %s", error->message);
+      g_error_free (error);
+    }
+  else
+    {
+      fp_info ("Reconnect succeeded -- session re-established");
+    }
+
+  if (cb)
+    cb (self, ok, cb_data);
+}
+
+void
+validity_reconnect_start (FpiDeviceValidity  *self,
+                          ValidityReconnectCb cb,
+                          gpointer            user_data)
+{
+  FpDevice *dev = FP_DEVICE (self);
+  GUsbDevice *usb = fpi_device_get_usb_device (dev);
+
+  g_autoptr(GError) error = NULL;
+  FpiSsm *ssm;
+
+  self->in_recovery = TRUE;
+  self->reconnect_cb = cb;
+  self->reconnect_cb_data = user_data;
+  self->reconnect_attempts++;
+
+  fp_info ("Reconnect attempt %u: re-running open on the same device",
+           self->reconnect_attempts);
+
+  /* Free the session-lost state and re-initialise it -- a close+open in place.
+   * The open sequence started below reloads the data package, re-reads the
+   * flash keys, re-runs the TLS handshake and recalibrates. */
+  validity_release_state (self);
+  validity_tls_init (&self->tls);
+  validity_sensor_state_init (&self->sensor);
+  validity_capture_state_init (&self->capture);
+
+  /* Soft-reset and re-claim interface 0, mirroring dev_open. If the reset
+  * caused a true re-enumeration the handle is dead and the claim fails --
+  * report failure so the caller falls back to FP_DEVICE_ERROR_REMOVED. */
+  g_usb_device_reset (usb, &error);
+  g_clear_error (&error);
+  g_usb_device_release_interface (usb, 0, 0, NULL);
+  if (!g_usb_device_claim_interface (usb, 0, 0, &error))
+    {
+      fp_warn ("Reconnect: re-claim failed (device gone): %s", error->message);
+      self->in_recovery = FALSE;
+      self->reconnect_cb = NULL;
+      self->reconnect_cb_data = NULL;
+      if (cb)
+        cb (self, FALSE, user_data);
+      return;
+    }
+
+  ssm = fpi_ssm_new (dev, open_run_state, OPEN_NUM_STATES);
+  self->open_ssm = ssm;
+  fpi_ssm_start (ssm, reconnect_ssm_done);
+}
+
 static void
 dev_open (FpDevice *device)
 {

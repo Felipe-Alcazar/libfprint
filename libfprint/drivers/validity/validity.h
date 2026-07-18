@@ -240,6 +240,12 @@ typedef enum {
 G_DECLARE_FINAL_TYPE (FpiDeviceValidity, fpi_device_validity,
                       FPI, DEVICE_VALIDITY, FpDevice)
 
+/* Invoked when validity_reconnect_start() finishes re-establishing the
+ * session; @success is FALSE if the device could not be recovered. */
+typedef void (*ValidityReconnectCb) (FpiDeviceValidity *self,
+                                     gboolean           success,
+                                     gpointer           user_data);
+
 struct _FpiDeviceValidity
 {
   FpDevice            parent;
@@ -253,6 +259,12 @@ struct _FpiDeviceValidity
 
   /* TLS session state */
   ValidityTlsState tls;
+
+  /* Tier 0 in-driver recovery (see validity_reconnect_start() in validity.c) */
+  ValidityReconnectCb reconnect_cb;
+  gpointer            reconnect_cb_data;
+  guint               reconnect_attempts;
+  gboolean            in_recovery;
 
   /* Sensor identification and HAL state (post-TLS) */
   ValiditySensorState sensor;
@@ -359,6 +371,18 @@ typedef enum {
 
 ValidityErrClass validity_classify_error (const GError *error,
                                           gboolean      device_alive);
+
+/* Liveness probe: TRUE if the sensor still answers on the bus (a reset that
+ * only dropped the session) vs FALSE if it has left (re-enumeration). Does one
+ * cheap control request; only call off the hot path (i.e. on an error). */
+gboolean validity_probe_alive (FpiDeviceValidity *self);
+
+/* Re-establish the sensor session in place after a mid-operation reset by
+ * re-running the proven open sequence (the same one a fprintd re-open runs).
+ * @cb is invoked with success/failure when it finishes. */
+void validity_reconnect_start (FpiDeviceValidity  *self,
+                               ValidityReconnectCb cb,
+                               gpointer            user_data);
 
 /* Verify/Identify SSMs (validity_verify.c) */
 /* Map a USB "no device" error (intermittent re-enumeration) to
