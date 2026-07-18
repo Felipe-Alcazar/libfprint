@@ -188,6 +188,8 @@ guint8 *validity_db_build_cmd_call_cleanups (gsize *out_len);
 guint8 *validity_db_build_cmd_erase_flash (guint8 partition,
                                            gsize *out_len);
 
+guint8 *validity_db_build_cmd_db_info (gsize *out_len);
+
 /* ================================================================
  * Response parsers — parse binary TLS response payloads
  *

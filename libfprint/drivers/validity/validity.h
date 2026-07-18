@@ -45,6 +45,12 @@
 /* Number of enroll stages */
 #define VALIDITY_ENROLL_STAGES 8
 
+/* Refuse a new enrollment when the DB partition has less free space than this
+ * (~one finger template of ~23 KB + a user record + record headers/slack), so
+ * a full partition fails early and cleanly with DATA_FULL instead of an opaque
+ * 0x04b5 protocol error at create_finger. */
+#define VALIDITY_ENROLL_MIN_FREE_BYTES 26624
+
 /* Interrupt response bits */
 #define VALIDITY_INT_FINGER_DOWN 0x02
 #define VALIDITY_INT_SCAN_COMPLETE 0x04
@@ -113,6 +119,8 @@ typedef enum {
 typedef enum {
   ENROLL_CLEANUP_STALE = 0,    /* Close any stale enrollment session */
   ENROLL_CLEANUP_STALE_RECV,
+  ENROLL_DB_INFO,              /* db_info free-space guard (avoid opaque 0x04b5) */
+  ENROLL_DB_INFO_RECV,
   ENROLL_START,                /* create_enrollment (cmd 0x69 flag=1) */
   ENROLL_START_RECV,
   /* --- Per-iteration loop --- */

@@ -887,6 +887,56 @@ enroll_run_state (FpiSsm   *ssm,
       fpi_ssm_next_state (ssm);
       break;
 
+    case ENROLL_DB_INFO:
+      {
+        gsize cmd_len;
+        guint8 *cmd = validity_db_build_cmd_db_info (&cmd_len);
+        vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
+        g_free (cmd);
+      }
+      break;
+
+    case ENROLL_DB_INFO_RECV:
+      {
+        ValidityDbInfo info = { 0 };
+        gboolean full = FALSE;
+
+        /* Free-space guard: the DB partition never auto-compacts, so it fills
+         * over enrollments and new_record then fails with an opaque 0x04b5.
+         * Check free space up front and fail cleanly with DATA_FULL instead. */
+        if (self->cmd_response_status == VCSFW_STATUS_OK &&
+            self->cmd_response_data &&
+            validity_db_parse_info (self->cmd_response_data,
+                                    self->cmd_response_len, &info))
+          {
+            fp_info ("DB partition: free=%u used=%u total=%u records=%u",
+                     info.free_space, info.used, info.total, info.records);
+            full = info.free_space < VALIDITY_ENROLL_MIN_FREE_BYTES;
+          }
+        else
+          {
+            /* Could not read db_info -- do not block on the guard; a genuinely
+            * full partition still surfaces (less cleanly) at create_finger. */
+            fp_warn ("db_info query failed (status=0x%04x) -- skipping guard",
+                     self->cmd_response_status);
+          }
+        validity_db_info_clear (&info);
+
+        if (full)
+          {
+            fp_warn ("DB partition full -- refusing enroll (free < %u bytes)",
+                     VALIDITY_ENROLL_MIN_FREE_BYTES);
+            fpi_ssm_mark_failed (ssm,
+                                 fpi_device_error_new_msg (
+                                   FP_DEVICE_ERROR_DATA_FULL,
+                                   "Fingerprint storage is full; clear "
+                                   "enrolled prints and retry"));
+            break;
+          }
+        fpi_ssm_next_state (ssm);
+      }
+      break;
+
     case ENROLL_START:
       {
         gsize cmd_len;

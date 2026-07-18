@@ -151,6 +151,13 @@ validity_db_build_cmd_call_cleanups (gsize *out_len)
   return validity_pack_new (out_len, "b", 0x1a);
 }
 
+/* cmd 0x45: Query DB partition info (total/used/free bytes, record count). */
+guint8 *
+validity_db_build_cmd_db_info (gsize *out_len)
+{
+  return validity_pack_new (out_len, "b", VCSFW_CMD_DB_INFO);
+}
+
 /* cmd 0x3f: Erase a flash partition. Destructive -- reclaims the space held by
  * deleted-but-uncompacted DB records (the chip does not auto-compact after a
  * del_record, so the partition fills with 0x04b5). Must be bracketed by
