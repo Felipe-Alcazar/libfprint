@@ -277,6 +277,7 @@ struct _FpiDeviceValidity
   gpointer            reconnect_cb_data;
   guint               reconnect_attempts;
   gboolean            in_recovery;
+  gboolean            recovery_redispatch;   /* re-dispatch after reconnect; keep the attempt count */
 
   /* Sensor identification and HAL state (post-TLS) */
   ValiditySensorState sensor;
@@ -395,6 +396,18 @@ gboolean validity_probe_alive (FpiDeviceValidity *self);
 void validity_reconnect_start (FpiDeviceValidity  *self,
                                ValidityReconnectCb cb,
                                gpointer            user_data);
+
+/* Max in-driver reconnect attempts per operation before giving up (REMOVED). */
+#define VALIDITY_MAX_RECONNECTS 3
+
+/* If @error during an operation is a recoverable device reset (device still on
+* the bus), start an in-driver reconnect and return TRUE -- the caller must NOT
+* complete its action. Otherwise return FALSE and the caller completes with the
+* error. Bounded by reconnect_attempts; a true re-enumeration returns FALSE. */
+gboolean validity_recover_or_fail (FpiDeviceValidity  *self,
+                                   const GError       *error,
+                                   ValidityReconnectCb on_done,
+                                   gpointer            user_data);
 
 /* Verify/Identify SSMs (validity_verify.c) */
 /* Map a USB "no device" error (intermittent re-enumeration) to

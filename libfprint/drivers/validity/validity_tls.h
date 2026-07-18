@@ -123,6 +123,7 @@ typedef struct
   gboolean secure_rx;
   gboolean secure_tx;
   gboolean keys_loaded;
+  gboolean session_broken;   /* chip sent a TLS alert -- session torn down */
 
   /* Runtime data keys (populated from data store during open) */
   const guint8 *password;       /* TLS password (32 bytes) */

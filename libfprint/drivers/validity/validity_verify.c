@@ -600,6 +600,35 @@ verify_run_state (FpiSsm   *ssm,
 }
 
 static void
+verify_reconnect_done (FpiDeviceValidity *self,
+                       gboolean           success,
+                       gpointer           user_data)
+{
+  FpDevice *dev = FP_DEVICE (self);
+  gboolean identify = GPOINTER_TO_INT (user_data);
+
+  if (success)
+    {
+      fp_info ("Reconnected -- retrying %s", identify ? "identify" : "verify");
+      self->recovery_redispatch = TRUE;
+      if (identify)
+        validity_identify (dev);
+      else
+        validity_verify (dev);
+      return;
+    }
+
+  fp_warn ("Reconnect failed -- reporting %s removed",
+           identify ? "identify" : "verify");
+  if (identify)
+    fpi_device_identify_complete (dev,
+                                  fpi_device_error_new (FP_DEVICE_ERROR_REMOVED));
+  else
+    fpi_device_verify_complete (dev,
+                                fpi_device_error_new (FP_DEVICE_ERROR_REMOVED));
+}
+
+static void
 verify_ssm_done (FpiSsm   *ssm,
                  FpDevice *dev,
                  GError   *error)
@@ -608,14 +637,23 @@ verify_ssm_done (FpiSsm   *ssm,
 
   if (error)
     {
+      g_clear_pointer (&self->bulk_data, g_free);
+      self->bulk_data_len = 0;
+
+      /* Recoverable mid-operation reset? Reconnect and retry instead of
+       * failing the action (bounded; a true removal falls through). */
+      if (validity_recover_or_fail (self, error, verify_reconnect_done,
+                                    GINT_TO_POINTER (self->identify_mode)))
+        {
+          g_error_free (error);
+          return;
+        }
+
       error = validity_map_removed_error (error);
       if (self->identify_mode)
         fpi_device_identify_complete (dev, error);
       else
         fpi_device_verify_complete (dev, error);
-
-      g_clear_pointer (&self->bulk_data, g_free);
-      self->bulk_data_len = 0;
       return;
     }
 
@@ -777,6 +815,10 @@ validity_verify (FpDevice *device)
     }
 
   self->identify_mode = FALSE;
+  if (self->recovery_redispatch)
+    self->recovery_redispatch = FALSE;   /* internal retry -- keep the budget */
+  else
+    self->reconnect_attempts = 0;        /* fresh action -- reset the budget */
 
   ssm = fpi_ssm_new (device, verify_run_state, VERIFY_NUM_STATES);
   fpi_ssm_start (ssm, verify_ssm_done);
@@ -797,6 +839,10 @@ validity_identify (FpDevice *device)
     }
 
   self->identify_mode = TRUE;
+  if (self->recovery_redispatch)
+    self->recovery_redispatch = FALSE;
+  else
+    self->reconnect_attempts = 0;
 
   ssm = fpi_ssm_new (device, verify_run_state, VERIFY_NUM_STATES);
   fpi_ssm_start (ssm, verify_ssm_done);

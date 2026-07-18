@@ -1457,6 +1457,43 @@ validity_reconnect_start (FpiDeviceValidity  *self,
   fpi_ssm_start (ssm, reconnect_ssm_done);
 }
 
+gboolean
+validity_recover_or_fail (FpiDeviceValidity  *self,
+                          const GError       *error,
+                          ValidityReconnectCb on_done,
+                          gpointer            user_data)
+{
+  ValidityErrClass klass;
+  gboolean alive;
+
+  if (self->in_recovery)                 /* already recovering -- don't stack */
+    return FALSE;
+  if (self->reconnect_attempts >= VALIDITY_MAX_RECONNECTS)
+    {
+      fp_warn ("Reconnect budget (%d) exhausted -- giving up",
+               VALIDITY_MAX_RECONNECTS);
+      return FALSE;
+    }
+
+  /* Probe liveness: distinguishes a session-losing reset (device still on the
+   * bus, recoverable) from a true re-enumeration (dead handle, not). */
+  alive = validity_probe_alive (self);
+  klass = validity_classify_error (error, alive);
+
+  /* A chip that reset its TLS session surfaces as a generic PROTO error plus
+   * the alert flag; treat that as a recoverable session loss if still alive. */
+  if (klass == VALIDITY_ERR_FATAL && self->tls.session_broken && alive)
+    klass = VALIDITY_ERR_SESSION_LOST;
+
+  if (klass != VALIDITY_ERR_PIPE_STALL && klass != VALIDITY_ERR_SESSION_LOST)
+    return FALSE;
+
+  fp_info ("Recoverable device reset mid-operation (%s) -- reconnecting",
+           klass == VALIDITY_ERR_PIPE_STALL ? "pipe stall" : "session lost");
+  validity_reconnect_start (self, on_done, user_data);
+  return TRUE;
+}
+
 static void
 dev_open (FpDevice *device)
 {

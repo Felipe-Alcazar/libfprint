@@ -530,6 +530,11 @@ validity_tls_unwrap_response (ValidityTlsState *tls,
         }
       else
         {
+          /* Content type 0x15 is a TLS alert: the chip tore down its session
+           * (e.g. after an internal reset). Flag it so the recovery layer can
+           * treat it as a recoverable session loss rather than a hard error. */
+          if (content_type == 0x15)
+            tls->session_broken = TRUE;
           g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
                        "TLS response: unknown content type 0x%02x",
                        content_type);

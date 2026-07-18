@@ -1362,6 +1362,28 @@ enroll_run_state (FpiSsm   *ssm,
 }
 
 static void
+enroll_reconnect_done (FpiDeviceValidity *self,
+                       gboolean           success,
+                       gpointer           user_data)
+{
+  FpDevice *dev = FP_DEVICE (self);
+
+  (void) user_data;
+
+  if (success)
+    {
+      fp_info ("Reconnected -- restarting enrollment");
+      self->recovery_redispatch = TRUE;
+      validity_enroll (dev);
+      return;
+    }
+
+  fp_warn ("Reconnect failed -- reporting enroll removed");
+  fpi_device_enroll_complete (dev, NULL,
+                              fpi_device_error_new (FP_DEVICE_ERROR_REMOVED));
+}
+
+static void
 enroll_ssm_done (FpiSsm   *ssm,
                  FpDevice *dev,
                  GError   *error)
@@ -1374,6 +1396,16 @@ enroll_ssm_done (FpiSsm   *ssm,
       self->enroll_template_len = 0;
       g_clear_pointer (&self->bulk_data, g_free);
       self->bulk_data_len = 0;
+
+      /* Recoverable mid-operation reset? Reconnect and restart enroll instead
+       * of failing the action (bounded; a true removal falls through). The
+       * on-chip enroll session is lost on reset, so this restarts from stage 0
+       * rather than resuming -- but the action does not fail. */
+      if (validity_recover_or_fail (self, error, enroll_reconnect_done, NULL))
+        {
+          g_error_free (error);
+          return;
+        }
 
       fpi_device_enroll_complete (dev, NULL, validity_map_removed_error (error));
       return;
@@ -1462,6 +1494,11 @@ validity_enroll (FpDevice *device)
       emulation_enroll (device);
       return;
     }
+
+  if (self->recovery_redispatch)
+    self->recovery_redispatch = FALSE;   /* internal retry -- keep the budget */
+  else
+    self->reconnect_attempts = 0;        /* fresh action -- reset the budget */
 
   ssm = fpi_ssm_new (device, enroll_run_state, ENROLL_NUM_STATES);
   fpi_ssm_start (ssm, enroll_ssm_done);
