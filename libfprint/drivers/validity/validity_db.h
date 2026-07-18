@@ -183,6 +183,11 @@ guint8 *validity_db_build_cmd_del_record (guint16 dbid,
 /* cmd 0x1a: Call cleanups (commit pending writes) */
 guint8 *validity_db_build_cmd_call_cleanups (gsize *out_len);
 
+/* User record DB partition -- erase this to reclaim flash after 0x04b5. */
+#define VALIDITY_DB_PARTITION 4
+guint8 *validity_db_build_cmd_erase_flash (guint8 partition,
+                                           gsize *out_len);
+
 /* ================================================================
  * Response parsers — parse binary TLS response payloads
  *

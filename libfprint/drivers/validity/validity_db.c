@@ -151,6 +151,18 @@ validity_db_build_cmd_call_cleanups (gsize *out_len)
   return validity_pack_new (out_len, "b", 0x1a);
 }
 
+/* cmd 0x3f: Erase a flash partition. Destructive -- reclaims the space held by
+ * deleted-but-uncompacted DB records (the chip does not auto-compact after a
+ * del_record, so the partition fills with 0x04b5). Must be bracketed by
+ * db_write_enable + call_cleanups. Format: 0x3f | partition(1). */
+guint8 *
+validity_db_build_cmd_erase_flash (guint8 partition,
+                                   gsize *out_len)
+{
+  return validity_pack_new (out_len, "bb",
+                            VCSFW_CMD_ERASE_FLASH, partition);
+}
+
 /* cmd 0x69: Create enrollment / End enrollment
  * Format: 0x69 | flag(4LE)
  * start=TRUE: flag=1, start=FALSE: flag=0 */

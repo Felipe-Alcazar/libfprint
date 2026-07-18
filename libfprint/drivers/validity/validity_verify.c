@@ -1241,74 +1241,6 @@ validity_delete (FpDevice *device)
  * ================================================================ */
 
 static void
-clear_get_storage (FpiSsm            *ssm,
-                   FpiDeviceValidity *self)
-{
-
-  gsize cmd_len;
-  guint8 *cmd = validity_db_build_cmd_get_user_storage (
-    VALIDITY_STORAGE_NAME, &cmd_len);
-
-  vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
-  g_free (cmd);
-}
-
-static void
-clear_get_storage_recv (FpiSsm            *ssm,
-                        FpiDeviceValidity *self)
-{
-
-  validity_user_storage_clear (&self->list_storage);
-
-  if (self->cmd_response_status != VCSFW_STATUS_OK ||
-      !self->cmd_response_data ||
-      !validity_db_parse_user_storage (self->cmd_response_data,
-                                       self->cmd_response_len,
-                                       &self->list_storage))
-    {
-      /* No storage or parse error — nothing to clear */
-      fpi_ssm_jump_to_state (ssm, CLEAR_DONE);
-      return;
-    }
-
-  self->list_user_idx = 0;
-  fpi_ssm_next_state (ssm);
-}
-
-static void
-clear_del_user (FpiSsm            *ssm,
-                FpiDeviceValidity *self)
-{
-
-  if (self->list_user_idx >= self->list_storage.user_count)
-    {
-      fpi_ssm_jump_to_state (ssm, CLEAR_DONE);
-      return;
-    }
-
-  guint16 user_dbid = self->list_storage.user_dbids[self->list_user_idx];
-
-  gsize cmd_len;
-  guint8 *cmd = validity_db_build_cmd_del_record (user_dbid, &cmd_len);
-  vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
-  g_free (cmd);
-}
-
-static void
-clear_del_user_recv (FpiSsm            *ssm,
-                     FpiDeviceValidity *self)
-{
-
-  if (self->cmd_response_status != VCSFW_STATUS_OK)
-    fp_warn ("clear_storage: del_record(dbid=%u) failed: status=0x%04x",
-             self->list_storage.user_dbids[self->list_user_idx],
-             self->cmd_response_status);
-
-  self->list_user_idx++;
-  fpi_ssm_jump_to_state (ssm, CLEAR_DEL_USER);
-}
-
-static void
 clear_run_state (FpiSsm   *ssm,
                  FpDevice *dev)
 {
@@ -1316,20 +1248,61 @@ clear_run_state (FpiSsm   *ssm,
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
-    case CLEAR_GET_STORAGE:
-      clear_get_storage (ssm, self);
+    case CLEAR_DB_WRITE_ENABLE:
+      {
+        gsize blob_len;
+        const guint8 *blob = validity_db_get_write_enable_blob (self, &blob_len);
+        vcsfw_tls_cmd_send (self, ssm, blob, blob_len, NULL);
+      }
       break;
 
-    case CLEAR_GET_STORAGE_RECV:
-      clear_get_storage_recv (ssm, self);
+    case CLEAR_DB_WRITE_ENABLE_RECV:
+      if (self->cmd_response_status != VCSFW_STATUS_OK)
+        {
+          fp_warn ("clear_storage: db_write_enable failed: 0x%04x",
+                   self->cmd_response_status);
+          fpi_ssm_mark_failed (ssm,
+                               fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+          break;
+        }
+      fpi_ssm_next_state (ssm);
       break;
 
-    case CLEAR_DEL_USER:
-      clear_del_user (ssm, self);
+    case CLEAR_ERASE:
+      {
+        gsize cmd_len;
+        guint8 *cmd = validity_db_build_cmd_erase_flash (VALIDITY_DB_PARTITION,
+                                                         &cmd_len);
+        vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
+        g_free (cmd);
+      }
       break;
 
-    case CLEAR_DEL_USER_RECV:
-      clear_del_user_recv (ssm, self);
+    case CLEAR_ERASE_RECV:
+      if (self->cmd_response_status != VCSFW_STATUS_OK)
+        {
+          fp_warn ("clear_storage: erase_flash(%d) failed: 0x%04x",
+                   VALIDITY_DB_PARTITION, self->cmd_response_status);
+          fpi_ssm_mark_failed (ssm,
+                               fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+          break;
+        }
+      fp_info ("clear_storage: erased DB partition %d (reclaimed flash)",
+               VALIDITY_DB_PARTITION);
+      fpi_ssm_next_state (ssm);
+      break;
+
+    case CLEAR_CLEANUPS:
+      {
+        gsize cmd_len;
+        guint8 *cmd = validity_db_build_cmd_call_cleanups (&cmd_len);
+        vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
+        g_free (cmd);
+      }
+      break;
+
+    case CLEAR_CLEANUPS_RECV:
+      fpi_ssm_next_state (ssm);
       break;
 
     case CLEAR_DONE:

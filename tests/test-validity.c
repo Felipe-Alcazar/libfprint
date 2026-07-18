@@ -2527,13 +2527,15 @@ test_match_finger_size (void)
 static void
 test_clear_storage_states_exist (void)
 {
-  /* Verify clear SSM states exist and are ordered correctly */
-  g_assert_cmpint (CLEAR_GET_STORAGE, ==, 0);
-  g_assert_cmpint (CLEAR_GET_STORAGE_RECV, ==, 1);
-  g_assert_cmpint (CLEAR_DEL_USER, ==, 2);
-  g_assert_cmpint (CLEAR_DEL_USER_RECV, ==, 3);
-  g_assert_cmpint (CLEAR_DONE, ==, 4);
-  g_assert_cmpint (CLEAR_NUM_STATES, ==, 5);
+  /* Clear erases the DB partition inside a db_write_enable / cleanups bracket. */
+  g_assert_cmpint (CLEAR_DB_WRITE_ENABLE, ==, 0);
+  g_assert_cmpint (CLEAR_DB_WRITE_ENABLE_RECV, ==, 1);
+  g_assert_cmpint (CLEAR_ERASE, ==, 2);
+  g_assert_cmpint (CLEAR_ERASE_RECV, ==, 3);
+  g_assert_cmpint (CLEAR_CLEANUPS, ==, 4);
+  g_assert_cmpint (CLEAR_CLEANUPS_RECV, ==, 5);
+  g_assert_cmpint (CLEAR_DONE, ==, 6);
+  g_assert_cmpint (CLEAR_NUM_STATES, ==, 7);
 }
 
 /* ================================================================

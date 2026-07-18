@@ -226,12 +226,16 @@ typedef enum {
   DELETE_NUM_STATES,
 } ValidityDeleteState;
 
-/* Clear storage SSM states */
+/* Clear storage SSM states. Clear erases the whole DB partition (cmd 0x3f),
+ * which reclaims flash, rather than del_record-ing each user (which does not
+ * compact and leaves the partition full). */
 typedef enum {
-  CLEAR_GET_STORAGE = 0,
-  CLEAR_GET_STORAGE_RECV,
-  CLEAR_DEL_USER,
-  CLEAR_DEL_USER_RECV,
+  CLEAR_DB_WRITE_ENABLE = 0,
+  CLEAR_DB_WRITE_ENABLE_RECV,
+  CLEAR_ERASE,
+  CLEAR_ERASE_RECV,
+  CLEAR_CLEANUPS,
+  CLEAR_CLEANUPS_RECV,
   CLEAR_DONE,
   CLEAR_NUM_STATES,
 } ValidityClearState;
