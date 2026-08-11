@@ -142,10 +142,24 @@ validity_fwext_get_firmware_name (guint16 vid,
   if (vid == 0x138a && pid == 0x0090)
     return "6_07f_Lenovo.xpfwext";
 
-  /* All other supported PIDs use the same firmware */
+  /* Lenovo variants */
   if ((vid == 0x138a && (pid == 0x0097 || pid == 0x009d)) ||
       (vid == 0x06cb && pid == 0x009a))
     return "6_07f_lenovo_mis_qm.xpfwext";
+
+  /* HP variants. These sensors normally ship with the firmware extension
+   * pre-loaded, so the upload path only runs on a genuinely virgin (or
+   * factory-erased) device -- but on such a device the wrong OEM firmware is
+   * rejected (Signature validation failed), so the name has to be correct.
+   * Filenames per python-validity firmware_tables and confirmed on 06cb:00b7
+   * hardware (HP EliteBook 840 G6) by @gfiguero on MR !626. NB 138a:00ab spans
+   * two silicon variants (0x969 ZBook / 0xd51 EliteBook 840 G5); both map to
+   * the same HP file here, matching python-validity. */
+  if ((vid == 0x138a && pid == 0x00ab) ||
+      (vid == 0x06cb && pid == 0x00b7))
+    return "6_07f_hp_cmit_mis_qm.xpfwext";
+  if (vid == 0x06cb && pid == 0x00cb)
+    return "6_07f_hp_mis_qm.xpfwext";
 
   return NULL;
 }
