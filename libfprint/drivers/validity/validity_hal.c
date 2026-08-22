@@ -109,10 +109,15 @@ static const ValidityDeviceDesc device_table[] = {
     .flash_layout = &flash_layout_standard,
   },
 
-  /* UNTESTED: ported from python-validity, not yet hardware-validated in libfprint */
   [VALIDITY_HAL_DEV_B7] = {
     .vid = 0x06cb,
     .pid = 0x00b7,
+    .flash_layout = &flash_layout_standard,
+  },
+
+  [VALIDITY_HAL_DEV_D2] = {
+    .vid = 0x06cb,
+    .pid = 0x00d2,
     .flash_layout = &flash_layout_standard,
   },
 };

@@ -158,7 +158,7 @@ validity_fwext_get_firmware_name (guint16 vid,
   if ((vid == 0x138a && pid == 0x00ab) ||
       (vid == 0x06cb && pid == 0x00b7))
     return "6_07f_hp_cmit_mis_qm.xpfwext";
-  if (vid == 0x06cb && pid == 0x00cb)
+  if (vid == 0x06cb && (pid == 0x00cb || pid == 0x00d2))
     return "6_07f_hp_mis_qm.xpfwext";
 
   return NULL;

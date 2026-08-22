@@ -62,7 +62,8 @@ typedef enum {
   VALIDITY_DEV_9D,      /* 138a:009d */
   VALIDITY_DEV_AB,      /* 138a:00ab (HP ZBook Studio x360 G5) */
   VALIDITY_DEV_CB,      /* 06cb:00cb (HP Pavilion x360 14-dh) */
-  VALIDITY_DEV_B7,      /* 06cb:00b7 (HP G6 series) -- UNTESTED, from python-validity */
+  VALIDITY_DEV_B7,      /* 06cb:00b7 (HP EliteBook 840 G6, 0xd51) -- hw-validated (@gfiguero) */
+  VALIDITY_DEV_D2,      /* 06cb:00d2 (HP ENVY 13-aq / ProBook 450 G10, 0x969) -- hw-validated (@david.escob.rodr) */
 } ValidityDeviceType;
 
 /* Firmware version info from GET_VERSION (cmd 0x01) */
