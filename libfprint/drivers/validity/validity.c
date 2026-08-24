@@ -332,10 +332,16 @@ fwext_upload_ssm_done (FpiSsm   *ssm,
   if (error)
     {
       fp_warn ("Firmware extension upload failed: %s", error->message);
-      /* Non-fatal: the device will work without fwext (TLS will be skipped)
-       * but user should be informed. Continue to OPEN_DONE. */
+      /* Non-fatal: capture/enroll/verify work fine on an already-provisioned
+       * sensor without re-uploading the fwext. Skip only the fwext step and
+       * continue with sensor identification and calibration -- jumping all the
+       * way to OPEN_DONE would skip OPEN_SENSOR_IDENTIFY, leaving
+       * self->sensor.type_info unset and asserting later in
+       * validity_capture_build_cmd_02(). This path is unconditional for devices
+       * whose .xpfwext is not distributed (e.g. 06cb:009a), so the crash hit on
+       * every open. */
       g_clear_error (&error);
-      fpi_ssm_jump_to_state (self->open_ssm, OPEN_DONE);
+      fpi_ssm_jump_to_state (self->open_ssm, OPEN_SENSOR_IDENTIFY);
       return;
     }
 
