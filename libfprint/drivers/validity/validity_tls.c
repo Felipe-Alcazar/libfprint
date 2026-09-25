@@ -135,37 +135,50 @@ validity_tls_free (ValidityTlsState *tls)
 
 /* ================================================================
  * PSK derivation from hardware identity (DMI)
+ *
+ * The two "PSK" keys are not TLS session keys. Pairing generates a
+ * P-256 key pair on the host and stores the private key in the
+ * sensor's flash (partition 1, TLS block 4), encrypted with
+ * psk_encryption_key (AES-256-CBC) and authenticated with
+ * psk_validation_key (HMAC-SHA256); see validity_pair_encrypt_key()
+ * and handle_priv_block(). That stored key is only used to sign the
+ * TLS CertificateVerify message. The session keys come from ECDH with
+ * an ephemeral key generated for every handshake (see
+ * validity_tls_build_client_finish()), not from the stored key.
+ *
+ * The inputs are the same as python-validity's (validitysensor/tls.py,
+ * Tls.__init__ and Tls.set_hwkey):
+ *   - SMBIOS type 1 "Product Name":  /sys/class/dmi/id/product_name
+ *     (world-readable)
+ *   - SMBIOS type 1 "Serial Number": /sys/class/dmi/id/product_serial
+ *     (readable by root only)
+ * with surrounding whitespace stripped, combined as name NUL serial
+ * NUL. Nothing here is vendor-specific. The derivation has to stay
+ * identical to python-validity's, and to the Windows driver's where it
+ * pairs the same way, or sensors that are already paired stop opening.
+ *
+ * If either file cannot be read, both values are replaced with
+ * "VirtualBox" and "0", as python-validity does. A blank SMBIOS string
+ * reads back as a bare newline; that is not a read failure, and the
+ * value is used as an empty string.
+ *
+ * The identity ties a pairing to the machine. If either value changes
+ * (system board replaced without the serial reprogrammed, sensor moved
+ * to another machine), the stored key no longer verifies and the
+ * sensor has to be paired again, which erases its templates.
  * ================================================================ */
 
 void
-validity_tls_derive_psk (ValidityTlsState *tls)
+validity_tls_derive_psk_from_identity (ValidityTlsState *tls,
+                                       const gchar      *product_name,
+                                       const gchar      *product_serial)
 {
-  g_autofree gchar *product_name = NULL;
-  g_autofree gchar *product_serial = NULL;
-
-  g_autoptr(GError) error_name = NULL;
-  g_autoptr(GError) error_serial = NULL;
-
-  g_file_get_contents ("/sys/class/dmi/id/product_name",
-                       &product_name, NULL, &error_name);
-  g_file_get_contents ("/sys/class/dmi/id/product_serial",
-                       &product_serial, NULL, &error_serial);
-
-  if (!product_name)
-    product_name = g_strdup ("VirtualBox");
-  else
-    g_strstrip (product_name);
-
-  if (!product_serial)
-    product_serial = g_strdup ("0");
-  else
-    g_strstrip (product_serial);
-
   /* hw_key = product_name + '\0' + serial_number + '\0' */
   gsize name_len = strlen (product_name);
   gsize serial_len = strlen (product_serial);
   gsize hw_key_len = name_len + 1 + serial_len + 1;
   g_autofree guint8 *hw_key = g_malloc (hw_key_len);
+
   memcpy (hw_key, product_name, name_len);
   hw_key[name_len] = '\0';
   memcpy (hw_key + name_len + 1, product_serial, serial_len);
@@ -187,7 +200,56 @@ validity_tls_derive_psk (ValidityTlsState *tls)
   validity_tls_prf (tls->psk_encryption_key, 32, seed2, seed2_len,
                     tls->psk_validation_key, 32);
 
-  fp_dbg ("PSK derived from DMI: product=%s", product_name);
+  /* With the public password and gwk_sign, these are enough to
+   * recompute the PSK. */
+  OPENSSL_cleanse (hw_key, hw_key_len);
+  OPENSSL_cleanse (seed, seed_len);
+}
+
+void
+validity_tls_derive_psk_from_files (ValidityTlsState *tls,
+                                    const gchar      *name_path,
+                                    const gchar      *serial_path)
+{
+  g_autofree gchar *product_name = NULL;
+  g_autofree gchar *product_serial = NULL;
+  gsize serial_size = 0;
+
+  g_autoptr(GError) error = NULL;
+
+  /* python-validity reads both files in one try block and falls back
+   * for both if either read fails; do the same so that both derive the
+   * same key on the same machine. */
+  if (!g_file_get_contents (name_path, &product_name, NULL, &error) ||
+      !g_file_get_contents (serial_path, &product_serial, &serial_size,
+                            &error))
+    {
+      fp_warn ("Cannot read the DMI product name and serial (%s); using "
+               "python-validity's fallback identity \"VirtualBox\"/\"0\". "
+               "A sensor paired under this machine's real identity cannot "
+               "set up its TLS session.", error->message);
+      validity_tls_derive_psk_from_identity (tls, "VirtualBox", "0");
+      return;
+    }
+
+  g_strstrip (product_name);
+  g_strstrip (product_serial);
+
+  validity_tls_derive_psk_from_identity (tls, product_name, product_serial);
+
+  /* Never log the serial itself, only whether there is one. */
+  fp_info ("PSK derived from DMI: product=\"%s\", serial %s",
+           product_name, *product_serial ? "present" : "empty");
+
+  OPENSSL_cleanse (product_serial, serial_size);
+}
+
+void
+validity_tls_derive_psk (ValidityTlsState *tls)
+{
+  validity_tls_derive_psk_from_files (tls,
+                                      "/sys/class/dmi/id/product_name",
+                                      "/sys/class/dmi/id/product_serial");
 }
 
 /* ================================================================

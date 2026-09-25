@@ -2829,7 +2829,7 @@ test_psk_derivation (void)
   tls.gwk_sign = test_gwk_sign;
   tls.gwk_sign_len = sizeof (test_gwk_sign);
 
-  validity_tls_derive_psk (&tls);
+  validity_tls_derive_psk_from_identity (&tls, "Test Product", "SN0001");
 
   /* PSK keys should not be all zeros */
   gboolean all_zero = TRUE;
@@ -2876,8 +2876,8 @@ test_psk_deterministic (void)
   tls2.gwk_sign = test_gwk_sign;
   tls2.gwk_sign_len = sizeof (test_gwk_sign);
 
-  validity_tls_derive_psk (&tls1);
-  validity_tls_derive_psk (&tls2);
+  validity_tls_derive_psk_from_identity (&tls1, "Test Product", "SN0001");
+  validity_tls_derive_psk_from_identity (&tls2, "Test Product", "SN0001");
 
   g_assert_cmpmem (tls1.psk_encryption_key, TLS_AES_KEY_SIZE,
                    tls2.psk_encryption_key, TLS_AES_KEY_SIZE);
@@ -2886,6 +2886,184 @@ test_psk_deterministic (void)
 
   validity_tls_free (&tls1);
   validity_tls_free (&tls2);
+}
+
+/* ================================================================
+ * Test: PSK derivation matches python-validity (known-answer vectors)
+ *
+ * The expected keys were computed with python-validity's own code
+ * (uunicorn/python-validity a6bbc21, validitysensor/tls.py): its prf()
+ * and Tls.set_hwkey(), run over this file's fake test_password and
+ * test_gwk_sign instead of python-validity's hardcoded constants. The
+ * HP-style serial is made up.
+ * ================================================================ */
+
+/* "VirtualBox" / "0": python-validity's fallback identity */
+static const guint8 kat_vbox_enc[32] = {
+  0x74, 0xb7, 0xf3, 0xae, 0x48, 0x45, 0xc2, 0x7e,
+  0xf4, 0x50, 0x19, 0xe4, 0xd3, 0x06, 0x69, 0x12,
+  0x19, 0x17, 0xf7, 0xbb, 0x8e, 0x84, 0xa2, 0x77,
+  0x8b, 0xba, 0xcb, 0x0c, 0xf7, 0x2a, 0xe1, 0x95,
+};
+
+static const guint8 kat_vbox_val[32] = {
+  0xc9, 0xea, 0xff, 0x2a, 0x17, 0x6c, 0x43, 0x9e,
+  0x0c, 0x37, 0x58, 0x71, 0x64, 0xfc, 0x0e, 0x51,
+  0x0c, 0x3c, 0x74, 0x5e, 0xb3, 0xcf, 0x5b, 0xfe,
+  0x99, 0x84, 0x9e, 0x1d, 0x84, 0x28, 0xb0, 0x33,
+};
+
+#define KAT_HP_NAME "HP EliteBook x360 1040 G6"
+#define KAT_HP_SERIAL "5CG0000000"
+
+/* KAT_HP_NAME / KAT_HP_SERIAL */
+static const guint8 kat_hp_enc[32] = {
+  0x56, 0x0f, 0x2d, 0xe6, 0x11, 0x14, 0xd7, 0x6d,
+  0xa0, 0xad, 0xb5, 0xff, 0x31, 0x7d, 0x07, 0xe0,
+  0xfb, 0xd6, 0xaa, 0x7b, 0xf3, 0xce, 0xb8, 0xee,
+  0xed, 0x09, 0xff, 0x48, 0x70, 0x63, 0xbe, 0x3f,
+};
+
+static const guint8 kat_hp_val[32] = {
+  0x90, 0x18, 0x8b, 0xc2, 0xf1, 0x0e, 0x3f, 0x80,
+  0x2b, 0xde, 0x10, 0xad, 0x79, 0x76, 0x4f, 0xa1,
+  0xa7, 0xff, 0xd8, 0x7f, 0x50, 0x61, 0xff, 0xf6,
+  0xd0, 0x1f, 0x6f, 0xa1, 0x6e, 0xba, 0x9d, 0x2b,
+};
+
+/* KAT_HP_NAME / "" (blank SMBIOS serial) */
+static const guint8 kat_hp_noserial_enc[32] = {
+  0xa8, 0xc6, 0xec, 0xb6, 0x66, 0xf8, 0x0e, 0x9b,
+  0x04, 0x9f, 0x10, 0xb2, 0x33, 0x18, 0x7e, 0x63,
+  0x53, 0x26, 0x8c, 0x62, 0xa0, 0xde, 0xd6, 0xb0,
+  0x89, 0x5a, 0xe5, 0x43, 0x36, 0x62, 0x98, 0x77,
+};
+
+static const guint8 kat_hp_noserial_val[32] = {
+  0xee, 0xe4, 0x88, 0x2f, 0x33, 0x64, 0x1b, 0x35,
+  0xce, 0x3f, 0xfa, 0xa2, 0xb9, 0x8d, 0x33, 0x14,
+  0xba, 0xfe, 0x1a, 0x59, 0x9d, 0xe3, 0x5f, 0x9c,
+  0xec, 0x4b, 0x51, 0x4e, 0x4c, 0x2a, 0x7e, 0x2f,
+};
+
+static void
+psk_kat_init (ValidityTlsState *tls)
+{
+  validity_tls_init (tls);
+  tls->password = test_password;
+  tls->password_len = sizeof (test_password);
+  tls->gwk_sign = test_gwk_sign;
+  tls->gwk_sign_len = sizeof (test_gwk_sign);
+}
+
+static void
+check_psk (const ValidityTlsState *tls,
+           const guint8           *want_enc,
+           const guint8           *want_val)
+{
+  g_assert_cmpmem (tls->psk_encryption_key, TLS_AES_KEY_SIZE,
+                   want_enc, TLS_AES_KEY_SIZE);
+  g_assert_cmpmem (tls->psk_validation_key, TLS_AES_KEY_SIZE,
+                   want_val, TLS_AES_KEY_SIZE);
+}
+
+static void
+test_psk_python_validity_kat (void)
+{
+  ValidityTlsState tls;
+
+  psk_kat_init (&tls);
+  validity_tls_derive_psk_from_identity (&tls, "VirtualBox", "0");
+  check_psk (&tls, kat_vbox_enc, kat_vbox_val);
+  validity_tls_free (&tls);
+
+  psk_kat_init (&tls);
+  validity_tls_derive_psk_from_identity (&tls, KAT_HP_NAME, KAT_HP_SERIAL);
+  check_psk (&tls, kat_hp_enc, kat_hp_val);
+  validity_tls_free (&tls);
+
+  /* An empty serial is part of the identity, not a fallback */
+  psk_kat_init (&tls);
+  validity_tls_derive_psk_from_identity (&tls, KAT_HP_NAME, "");
+  check_psk (&tls, kat_hp_noserial_enc, kat_hp_noserial_val);
+  validity_tls_free (&tls);
+}
+
+/* ================================================================
+ * Test: reading the DMI files, stripping, and the fallback
+ *
+ * Same behaviour as python-validity's Tls.__init__: both values are
+ * stripped, a blank value is used as an empty string, and if either
+ * file cannot be read both values become "VirtualBox" / "0".
+ *
+ * On success the whole debug line is matched, so it has to name the
+ * stripped product and must not contain the serial.
+ * ================================================================ */
+#define KAT_HP_LOG_PRESENT \
+  "PSK derived from DMI: product=\"" KAT_HP_NAME "\", serial present"
+#define KAT_HP_LOG_EMPTY \
+  "PSK derived from DMI: product=\"" KAT_HP_NAME "\", serial empty"
+
+static void
+check_psk_from_files (const gchar  *name_content,   /* NULL: no file */
+                      const gchar  *serial_content, /* NULL: no file */
+                      const gchar  *want_log,       /* NULL: fallback */
+                      const guint8 *want_enc,
+                      const guint8 *want_val)
+{
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("validity-dmi-XXXXXX", NULL);
+
+  g_assert_nonnull (tmpdir);
+
+  g_autofree gchar *name_path = g_build_filename (tmpdir, "product_name",
+                                                  NULL);
+  g_autofree gchar *serial_path = g_build_filename (tmpdir, "product_serial",
+                                                    NULL);
+
+  if (name_content)
+    g_assert_true (g_file_set_contents (name_path, name_content, -1, NULL));
+  if (serial_content)
+    g_assert_true (g_file_set_contents (serial_path, serial_content, -1,
+                                        NULL));
+
+  if (want_log)
+    g_test_expect_message ("libfprint-validity", G_LOG_LEVEL_DEBUG, want_log);
+  else
+    g_test_expect_message ("libfprint-validity", G_LOG_LEVEL_WARNING,
+                           "*fallback identity*");
+
+  ValidityTlsState tls;
+  psk_kat_init (&tls);
+  validity_tls_derive_psk_from_files (&tls, name_path, serial_path);
+  g_test_assert_expected_messages ();
+  check_psk (&tls, want_enc, want_val);
+  validity_tls_free (&tls);
+
+  g_remove (name_path);
+  g_remove (serial_path);
+  g_rmdir (tmpdir);
+}
+
+static void
+test_psk_from_files (void)
+{
+  /* sysfs values end in a newline */
+  check_psk_from_files (KAT_HP_NAME "\n", KAT_HP_SERIAL "\n",
+                        KAT_HP_LOG_PRESENT, kat_hp_enc, kat_hp_val);
+  check_psk_from_files ("  " KAT_HP_NAME " \n", " " KAT_HP_SERIAL "\t\n",
+                        KAT_HP_LOG_PRESENT, kat_hp_enc, kat_hp_val);
+
+  /* Blank SMBIOS serial: sysfs shows a bare newline, used as "" */
+  check_psk_from_files (KAT_HP_NAME "\n", "\n",
+                        KAT_HP_LOG_EMPTY, kat_hp_noserial_enc,
+                        kat_hp_noserial_val);
+
+  /* Either file unreadable: both values fall back */
+  check_psk_from_files (KAT_HP_NAME "\n", NULL, NULL,
+                        kat_vbox_enc, kat_vbox_val);
+  check_psk_from_files (NULL, KAT_HP_SERIAL "\n", NULL,
+                        kat_vbox_enc, kat_vbox_val);
+  check_psk_from_files (NULL, NULL, NULL, kat_vbox_enc, kat_vbox_val);
 }
 
 /* ================================================================
@@ -3054,7 +3232,8 @@ test_flash_parse_needs_psk (void)
   tls_with_psk.gwk_sign_len = sizeof (test_gwk_sign);
 
   /* Derive PSK so we can build a valid encrypted private key block */
-  validity_tls_derive_psk (&tls_with_psk);
+  validity_tls_derive_psk_from_identity (&tls_with_psk, "Test Product",
+                                         "SN0001");
 
   /* Build a realistic flash image with a cert block + encrypted privkey block.
    * We use a minimal cert (just 16 bytes of dummy data) and a privkey block
@@ -5899,6 +6078,9 @@ main (int argc, char *argv[])
   g_test_add_func ("/validity/tls/decrypt/invalid", test_decrypt_invalid);
   g_test_add_func ("/validity/tls/psk/derivation", test_psk_derivation);
   g_test_add_func ("/validity/tls/psk/deterministic", test_psk_deterministic);
+  g_test_add_func ("/validity/tls/psk/python-validity-kat",
+                   test_psk_python_validity_kat);
+  g_test_add_func ("/validity/tls/psk/from-files", test_psk_from_files);
   g_test_add_func ("/validity/tls/flash/parse-empty", test_flash_parse_empty);
   g_test_add_func ("/validity/tls/flash/parse-truncated",
                    test_flash_parse_truncated);

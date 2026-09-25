@@ -162,6 +162,14 @@ void     validity_tls_free (ValidityTlsState *tls);
 
 void     validity_tls_derive_psk (ValidityTlsState *tls);
 
+/* The steps of validity_tls_derive_psk() -- exported for testing */
+void     validity_tls_derive_psk_from_files (ValidityTlsState *tls,
+                                             const gchar      *name_path,
+                                             const gchar      *serial_path);
+void     validity_tls_derive_psk_from_identity (ValidityTlsState *tls,
+                                                const gchar      *product_name,
+                                                const gchar      *product_serial);
+
 gboolean validity_tls_parse_flash (ValidityTlsState *tls,
                                    const guint8     *data,
                                    gsize             data_len,
