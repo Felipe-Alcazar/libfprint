@@ -364,6 +364,18 @@ pair_ssm_done (FpiSsm   *ssm,
 
   if (error)
     {
+      /* The pair SSM refused: partition 1 of a partitioned sensor is
+       * blank, partial or unreadable, partition_flash returned 0x0404, or
+       * a reconnect would need pairing. Its error says why; fail the open
+       * with it rather than carry on with a sensor we cannot talk to. */
+      if (self->pair_state.refused)
+        {
+          fp_warn ("Pairing refused: %s", error->message);
+          validity_pair_state_free (&self->pair_state);
+          fpi_ssm_mark_failed (self->open_ssm, error);
+          return;
+        }
+
       /* After reboot, USB transfers fail — this is expected */
       if (self->pair_state.reboot_pending)
         {
@@ -398,7 +410,8 @@ pair_ssm_done (FpiSsm   *ssm,
       return;
     }
 
-  /* Pairing was not needed (num_partitions > 0) — continue */
+  /* Keys present (pairing not needed), or a pairing error that was not a
+   * refusal -- continue */
   validity_pair_state_free (&self->pair_state);
   fpi_ssm_next_state (self->open_ssm);
 }
@@ -771,6 +784,11 @@ open_pair (FpiSsm            *ssm,
 
   fp_info ("Starting pairing check…");
   validity_pair_state_init (&self->pair_state);
+  /* The in-driver reconnect re-runs this sequence to restore a session with
+   * a sensor that was working moments ago. It must never pair (pairing
+   * erases flash): run the read-only check, and let the pair SSM refuse,
+   * failing the reconnect, if pairing would be needed. */
+  self->pair_state.check_only = self->in_recovery;
   self->open_ssm = ssm;
   FpiSsm *pair_ssm = validity_pair_ssm_new (dev);
   fpi_ssm_start (pair_ssm, pair_ssm_done);

@@ -39,12 +39,44 @@ typedef struct
   guint8  sector_erase_cmd;
 } ValidityFlashIcParams;
 
+/* What the partition-1 (host key store) read says about the pairing.
+ * See validity_pair_classify_tls_flash(). */
+typedef enum {
+  VALIDITY_TLS_FLASH_KEYS_PRESENT = 0, /* cert (3), private key (4), ECDH (6) */
+  VALIDITY_TLS_FLASH_BLANK,            /* complete read, end marker first */
+  VALIDITY_TLS_FLASH_PARTIAL,          /* some blocks, but not all three keys */
+  VALIDITY_TLS_FLASH_UNREADABLE,       /* bad status, or short/unparseable read */
+} ValidityTlsFlashClass;
+
+/* What the pairing check decided open may do. See validity_pair_decide().
+ * PROVISION is the only value that starts pairing. */
+typedef enum {
+  VALIDITY_PAIR_NOT_NEEDED = 0,     /* keys present: nothing to do */
+  VALIDITY_PAIR_PROVISION,          /* 0 partitions: provision from scratch */
+  VALIDITY_PAIR_REFUSE_BLANK,       /* partitioned, but partition 1 blank */
+  VALIDITY_PAIR_REFUSE_UNREADABLE,  /* could not read partition 1 */
+  VALIDITY_PAIR_REFUSE_PARTIAL,     /* key data we cannot use */
+  VALIDITY_PAIR_REFUSE_RECOVERY,    /* would provision, but in a reconnect */
+} ValidityPairDecision;
+
 /* Pairing state kept across SSM states */
 typedef struct
 {
   /* Flash IC params from CMD 0x3e */
   ValidityFlashIcParams flash_ic;
   guint16               num_partitions;  /* 0 = needs pairing */
+
+  /* Set by the caller before starting the SSM: run the read-only pairing
+   * check, but refuse to pair. Used by the in-driver reconnect. */
+  gboolean check_only;
+
+  /* Result of the pairing check (validity_pair_decide) */
+  ValidityPairDecision decision;
+
+  /* Set when the SSM refused to pair, or stopped pairing on a 0x0404 from
+   * partition_flash. pair_ssm_done then fails the open with the SSM's error
+   * instead of continuing. */
+  gboolean refused;
 
   /* ECDH client key pair (generated during pairing) */
   EVP_PKEY *client_key;
@@ -67,7 +99,7 @@ typedef struct
   /* Flash erase progress counter */
   guint erase_step;
 
-  /* Set TRUE when reboot command has been sent (normal pairing or factory reset) */
+  /* Set TRUE when the reboot command at the end of pairing has been sent */
   gboolean reboot_pending;
 } ValidityPairState;
 
@@ -192,6 +224,43 @@ gboolean validity_pair_parse_flash_info (const guint8          *data,
                                          guint16               *num_partitions_out);
 
 /**
+ * validity_pair_classify_tls_flash:
+ * @status: VCSFW status of the partition-1 READ_FLASH (CMD 0x40)
+ * @data: response payload after the status: [size:4LE][unknown:2][flash]
+ * @len: length of @data
+ *
+ * Classify the host key store. KEYS_PRESENT needs blocks 3, 4 and 6 (as
+ * before; the TLS parse validates them later). BLANK needs a complete read
+ * whose first block header is the 0xFFFF end marker (erased flash reads as
+ * 0xFF). A read that is short, truncated or runs off the end of its data
+ * before finding the keys is UNREADABLE, never BLANK, so a bad read is not
+ * reported as an empty partition 1.
+ *
+ * Returns: the #ValidityTlsFlashClass.
+ */
+ValidityTlsFlashClass validity_pair_classify_tls_flash (guint16       status,
+                                                        const guint8 *data,
+                                                        gsize         len);
+
+/**
+ * validity_pair_decide:
+ * @num_partitions: partition count from GET_FLASH_INFO
+ * @flash: partition-1 class; ignored when @num_partitions is 0 (partition 1
+ *   is not read then)
+ * @check_only: %TRUE when pairing must not start (in-driver reconnect)
+ *
+ * Only a sensor with no partitions may be paired (PROVISION, as
+ * python-validity's init_flash does), and never when @check_only is set.
+ * On a partitioned sensor, keys present needs nothing and every other class
+ * is refused, whatever @check_only is.
+ *
+ * Returns: the #ValidityPairDecision.
+ */
+ValidityPairDecision validity_pair_decide (guint16               num_partitions,
+                                           ValidityTlsFlashClass flash,
+                                           gboolean              check_only);
+
+/**
  * validity_pair_state_init:
  * @state: pairing state to initialize
  *
@@ -210,10 +279,13 @@ void validity_pair_state_free (ValidityPairState *state);
 /* ================================================================
  * Pairing SSM
  *
- * The pairing SSM runs when an uninitialized device is detected
- * (CMD 0x3e returns 0 partitions). It formats the flash, exchanges
- * ECDH keys, establishes a TLS session, persists the TLS keys to
- * flash, and reboots the device.
+ * The pairing SSM runs on every open. It does nothing more when
+ * partition 1 holds the host keys, pairs only an uninitialized device
+ * (CMD 0x3e returns 0 partitions), and refuses otherwise (see
+ * validity_pair_decide). Pairing formats the flash, exchanges ECDH keys,
+ * establishes a TLS session, persists the TLS keys to flash, and reboots
+ * the device. It never sends a factory reset: a 0x0404 from
+ * PARTITION_FLASH fails the open.
  *
  * Phase 1 (pre-TLS, raw USB):
  *   - GET_FLASH_INFO  → check if pairing needed
@@ -257,8 +329,6 @@ typedef enum {
   PAIR_GENERATE_KEYS,
   PAIR_PARTITION_FLASH_SEND,
   PAIR_PARTITION_FLASH_RECV,
-  PAIR_FACTORY_RESET_SEND,
-  PAIR_FACTORY_RESET_RECV,
   PAIR_CMD50_SEND,
   PAIR_CMD50_RECV,
   PAIR_CMD50_PROCESS,

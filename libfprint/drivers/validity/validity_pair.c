@@ -112,6 +112,130 @@ validity_pair_parse_flash_info (const guint8          *data,
 }
 
 /* ================================================================
+ * Pairing decision
+ *
+ * Pairing sends reset_blob and partition_flash and erases flash partitions,
+ * so the check fails closed, with the same rule as python-validity's
+ * init_flash: only a sensor that reports no partitions is paired. On a
+ * partitioned sensor, keys present needs nothing, and a blank, partial or
+ * unreadable partition 1 fails the open instead.
+ * ================================================================ */
+
+/* READ_FLASH response header before the flash data: [size:4LE][unknown:2] */
+#define TLS_FLASH_RESPONSE_HEADER_SIZE 6
+
+ValidityTlsFlashClass
+validity_pair_classify_tls_flash (guint16       status,
+                                  const guint8 *data,
+                                  gsize         len)
+{
+  FpiByteReader r;
+  guint32 flash_sz = 0;
+  gsize flash_avail;
+  gboolean found_priv = FALSE, found_ecdh = FALSE, found_cert = FALSE;
+  gboolean incomplete = FALSE, saw_end = FALSE;
+  guint n_blocks = 0;
+
+  if (status != VCSFW_STATUS_OK || data == NULL ||
+      len < TLS_FLASH_RESPONSE_HEADER_SIZE)
+    return VALIDITY_TLS_FLASH_UNREADABLE;
+
+  flash_sz = FP_READ_UINT32_LE (data);
+  flash_avail = len - TLS_FLASH_RESPONSE_HEADER_SIZE;
+  if (flash_sz > flash_avail)
+    {
+      /* Short read: the sensor sent less than it declared */
+      incomplete = TRUE;
+      flash_sz = flash_avail;
+    }
+
+  fpi_byte_reader_init (&r, data + TLS_FLASH_RESPONSE_HEADER_SIZE, flash_sz);
+
+  while (fpi_byte_reader_get_remaining (&r) >= TLS_FLASH_BLOCK_HEADER_SIZE)
+    {
+      guint16 block_id = 0, block_size = 0;
+
+      fpi_byte_reader_get_uint16_le (&r, &block_id);
+      fpi_byte_reader_get_uint16_le (&r, &block_size);
+
+      if (block_id == TLS_FLASH_BLOCK_END)
+        {
+          saw_end = TRUE;
+          break;
+        }
+
+      fpi_byte_reader_skip (&r, 32);  /* hash */
+
+      if (block_size > fpi_byte_reader_get_remaining (&r))
+        {
+          incomplete = TRUE;
+          break;
+        }
+
+      n_blocks++;
+      if (block_id == TLS_FLASH_BLOCK_PRIVKEY)
+        found_priv = TRUE;
+      if (block_id == TLS_FLASH_BLOCK_ECDH)
+        found_ecdh = TRUE;
+      if (block_id == TLS_FLASH_BLOCK_CERT)
+        found_cert = TRUE;
+
+      fpi_byte_reader_skip (&r, block_size);
+    }
+
+  /* Same test as before this was split out: the TLS parse checks the
+   * blocks' hashes and the private key's HMAC afterwards. */
+  if (found_priv && found_ecdh && found_cert)
+    return VALIDITY_TLS_FLASH_KEYS_PRESENT;
+
+  /* We cannot tell what the unread part holds, so do not call it blank or
+   * partial. */
+  if (incomplete)
+    return VALIDITY_TLS_FLASH_UNREADABLE;
+
+  if (n_blocks == 0)
+    /* Blank only if the end marker was actually seen; a read too short to
+     * hold one block header proves nothing. */
+    return saw_end ? VALIDITY_TLS_FLASH_BLANK : VALIDITY_TLS_FLASH_UNREADABLE;
+
+  return VALIDITY_TLS_FLASH_PARTIAL;
+}
+
+ValidityPairDecision
+validity_pair_decide (guint16               num_partitions,
+                      ValidityTlsFlashClass flash,
+                      gboolean              check_only)
+{
+  /* No partition table: by the firmware's own report there is no key store
+   * and no template partition, so there is nothing on the sensor to lose.
+   * This is the only case python-validity's init_flash provisions; it
+   * returns without pairing whenever any partition exists. */
+  if (num_partitions == 0)
+    return check_only ? VALIDITY_PAIR_REFUSE_RECOVERY : VALIDITY_PAIR_PROVISION;
+
+  /* Partitioned: never paired, whatever partition 1 holds */
+  switch (flash)
+    {
+    case VALIDITY_TLS_FLASH_KEYS_PRESENT:
+      return VALIDITY_PAIR_NOT_NEEDED;
+
+    case VALIDITY_TLS_FLASH_BLANK:
+      /* Partitioned, but partition 1 was never written, for example after
+       * an interrupted pairing (not confirmed on hardware). Pairing again
+       * would mean sending reset_blob and partition_flash to a partitioned
+       * sensor, which python-validity never does. */
+      return VALIDITY_PAIR_REFUSE_BLANK;
+
+    case VALIDITY_TLS_FLASH_PARTIAL:
+      return VALIDITY_PAIR_REFUSE_PARTIAL;
+
+    case VALIDITY_TLS_FLASH_UNREADABLE:
+    default:
+      return VALIDITY_PAIR_REFUSE_UNREADABLE;
+    }
+}
+
+/* ================================================================
  * Partition serialization
  *
  * Each entry: [id:1][type:1][access:2LE][offset:4LE][size:4LE]
@@ -618,6 +742,104 @@ validity_pair_build_tls_flash (const ValidityPairState *state,
  * ================================================================ */
 
 
+/* Fail the pair SSM because pairing was refused or stopped on a 0x0404. The
+ * refused flag makes pair_ssm_done fail the open with @error instead of
+ * continuing as it does for other pairing errors. */
+static void
+pair_refuse (FpiSsm            *ssm,
+             FpiDeviceValidity *self,
+             GError            *error)
+{
+  self->pair_state.refused = TRUE;
+  fpi_ssm_mark_failed (ssm, error);
+}
+
+/* Act on self->pair_state.decision: skip pairing, start it, or refuse with a
+ * message that says what state the sensor is in. Only PROVISION starts
+ * pairing; any other value, including one this switch does not know, ends
+ * the SSM before reset_blob is sent. */
+static void
+pair_apply_decision (FpiSsm            *ssm,
+                     FpiDeviceValidity *self)
+{
+  ValidityPairState *ps = &self->pair_state;
+
+  switch (ps->decision)
+    {
+    case VALIDITY_PAIR_NOT_NEEDED:
+      fp_info ("TLS keys verified on flash — pairing not needed");
+      fpi_ssm_jump_to_state (ssm, PAIR_DONE);
+      return;
+
+    case VALIDITY_PAIR_PROVISION:
+      fp_info ("Flash has 0 partitions — device needs pairing");
+      break;
+
+    case VALIDITY_PAIR_REFUSE_BLANK:
+      pair_refuse (ssm, self,
+                   fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                             "The sensor's flash is partitioned, "
+                                             "but partition 1 holds no pairing "
+                                             "keys (for example after an "
+                                             "interrupted pairing). Provisioning "
+                                             "it again needs a factory reset, "
+                                             "which erases the whole sensor, "
+                                             "including any fingerprints stored "
+                                             "on it, so it is not done "
+                                             "automatically"));
+      return;
+
+    case VALIDITY_PAIR_REFUSE_UNREADABLE:
+      pair_refuse (ssm, self,
+                   fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                             "Could not get a complete read of the "
+                                             "sensor's pairing data (partition 1, "
+                                             "status 0x%04x, %" G_GSIZE_FORMAT " bytes); not pairing",
+                                             self->cmd_response_status,
+                                             self->cmd_response_len));
+      return;
+
+    case VALIDITY_PAIR_REFUSE_PARTIAL:
+      pair_refuse (ssm, self,
+                   fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                             "The sensor holds pairing data this "
+                                             "driver cannot use (partition 1 has no "
+                                             "complete key set). Re-pairing it would "
+                                             "need a factory reset, which erases the "
+                                             "fingerprints stored on the sensor, so "
+                                             "it is not done automatically"));
+      return;
+
+    case VALIDITY_PAIR_REFUSE_RECOVERY:
+      pair_refuse (ssm, self,
+                   fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                             "Sensor needs pairing, which is never "
+                                             "started from an in-driver reconnect"));
+      return;
+
+    default:
+      /* Fail closed: only an explicit PROVISION may start pairing */
+      pair_refuse (ssm, self,
+                   fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                             "Unknown pairing decision %d; "
+                                             "not pairing",
+                                             (gint) ps->decision));
+      return;
+    }
+
+  /* Only VALIDITY_PAIR_PROVISION gets here. Look up device descriptor */
+  ps->dev_desc = validity_hal_device_lookup (self->dev_type);
+  if (!ps->dev_desc)
+    {
+      fp_warn ("No HAL descriptor for dev_type=%u", self->dev_type);
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED));
+      return;
+    }
+
+  fpi_ssm_jump_to_state (ssm, PAIR_SEND_RESET_BLOB);
+}
+
 static void
 pair_check_needed (FpiSsm            *ssm,
                    FpiDeviceValidity *self)
@@ -650,26 +872,15 @@ pair_check_needed (FpiSsm            *ssm,
     {
       fp_info ("Flash has %u partitions — verifying TLS keys",
                ps->num_partitions);
-      /* Read flash partition 1 to check if TLS keys exist.
-       * If they do, pairing is complete. If not, we re-pair. */
+      /* Read flash partition 1 to check if TLS keys exist */
       fpi_ssm_next_state (ssm);
       return;
     }
 
-  fp_info ("Flash has 0 partitions — device needs pairing");
-
-  /* Look up device descriptor */
-  ps->dev_desc = validity_hal_device_lookup (self->dev_type);
-  if (!ps->dev_desc)
-    {
-      fp_warn ("No HAL descriptor for dev_type=%u", self->dev_type);
-      fpi_ssm_mark_failed (ssm,
-                           fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED));
-      return;
-    }
-
-  /* No partitions — skip TLS verify, go straight to pairing */
-  fpi_ssm_jump_to_state (ssm, PAIR_SEND_RESET_BLOB);
+  /* No partitions: partition 1 is not read, so decide straight away */
+  ps->decision = validity_pair_decide (0, VALIDITY_TLS_FLASH_UNREADABLE,
+                                       ps->check_only);
+  pair_apply_decision (ssm, self);
 }
 
 static void
@@ -677,76 +888,14 @@ pair_verify_tls_recv (FpiSsm            *ssm,
                       FpiDeviceValidity *self)
 {
   ValidityPairState *ps = &self->pair_state;
+  ValidityTlsFlashClass flash;
 
-  /* Check if TLS flash has valid key data */
-  gboolean have_keys = FALSE;
-
-  if (self->cmd_response_status == VCSFW_STATUS_OK &&
-      self->cmd_response_data && self->cmd_response_len > 6)
-    {
-      FpiByteReader resp_reader;
-      fpi_byte_reader_init (&resp_reader, self->cmd_response_data,
-                            self->cmd_response_len);
-      guint32 flash_sz = 0;
-      fpi_byte_reader_get_uint32_le (&resp_reader, &flash_sz);
-      const guint8 *flash_data = self->cmd_response_data + 6;
-      gsize flash_avail = self->cmd_response_len - 6;
-
-      if (flash_sz > flash_avail)
-        flash_sz = flash_avail;
-
-      /* Quick check: scan for block IDs 3 (cert), 4 (privkey), 6 (ecdh) */
-      FpiByteReader block_reader;
-      fpi_byte_reader_init (&block_reader, flash_data, flash_sz);
-      gboolean found_priv = FALSE, found_ecdh = FALSE, found_cert = FALSE;
-
-      while (fpi_byte_reader_get_remaining (&block_reader) >= 36)  /* header(4) + hash(32) */
-        {
-          guint16 block_id = 0, block_size = 0;
-          fpi_byte_reader_get_uint16_le (&block_reader, &block_id);
-          fpi_byte_reader_get_uint16_le (&block_reader, &block_size);
-
-          if (block_id == 0xFFFF)
-            break;
-
-          fpi_byte_reader_skip (&block_reader, 32);  /* hash */
-
-          if (block_size > fpi_byte_reader_get_remaining (&block_reader))
-            break;
-
-          if (block_id == 4)
-            found_priv = TRUE;
-          if (block_id == 6)
-            found_ecdh = TRUE;
-          if (block_id == 3)
-            found_cert = TRUE;
-
-          fpi_byte_reader_skip (&block_reader, block_size);
-        }
-
-      have_keys = found_priv && found_ecdh && found_cert;
-    }
-
-  if (have_keys)
-    {
-      fp_info ("TLS keys verified on flash — pairing not needed");
-      fpi_ssm_jump_to_state (ssm, PAIR_DONE);
-      return;
-    }
-
-  fp_info ("TLS keys missing from flash — starting pairing");
-
-  /* Look up device descriptor */
-  ps->dev_desc = validity_hal_device_lookup (self->dev_type);
-  if (!ps->dev_desc)
-    {
-      fp_warn ("No HAL descriptor for dev_type=%u", self->dev_type);
-      fpi_ssm_mark_failed (ssm,
-                           fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED));
-      return;
-    }
-
-  fpi_ssm_next_state (ssm);
+  flash = validity_pair_classify_tls_flash (self->cmd_response_status,
+                                            self->cmd_response_data,
+                                            self->cmd_response_len);
+  ps->decision = validity_pair_decide (ps->num_partitions, flash,
+                                       ps->check_only);
+  pair_apply_decision (ssm, self);
 }
 
 static void
@@ -886,11 +1035,21 @@ pair_partition_flash_recv (FpiSsm            *ssm,
 
   if (self->cmd_response_status == 0x0404)
     {
-      /* 0x0404 = partitions already exist (half-initialized device).
-       * Factory reset will wipe flash, then reboot. Next device open
-       * will start with a clean slate and full pairing will succeed. */
-      fp_info ("Flash already partitioned (0x0404) — factory reset needed");
-      fpi_ssm_next_state (ssm);
+      /* 0x0404 has been read both as "partitions already exist" and as
+       * insufficient privilege; either way the firmware declined to
+       * partition, although GET_FLASH_INFO reported no partitions. Fail the
+       * open with a specific error. Never escalate to a factory reset
+       * (cmd 0x10), which would wipe the whole sensor: python-validity's
+       * init_flash also just fails on any partition_flash error, and it
+       * factory-resets only from a separate script. */
+      pair_refuse (ssm, self,
+                   fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                             "The sensor reported no partitions "
+                                             "but refused to partition its flash "
+                                             "(partition_flash returned 0x0404), "
+                                             "so it was not paired. The driver "
+                                             "does not factory-reset the sensor "
+                                             "to get past this"));
       return;
     }
 
@@ -918,8 +1077,7 @@ pair_partition_flash_recv (FpiSsm            *ssm,
         }
     }
 
-  /* Skip factory reset states — go straight to CMD50 */
-  fpi_ssm_jump_to_state (ssm, PAIR_CMD50_SEND);
+  fpi_ssm_next_state (ssm);
 }
 
 static void
@@ -1212,8 +1370,9 @@ pair_reboot_send (FpiSsm            *ssm,
 {
   ValidityPairState *ps = &self->pair_state;
 
-  /* Reboot: 0x05 0x02 0x00 (python-validity: tls.cmd(unhex('050200')))
-   * Use raw USB — TLS may not be established (factory reset path). */
+  /* Reboot: 0x05 0x02 0x00, sent over raw USB. python-validity sends it
+   * with tls.cmd(unhex('050200')), which goes over the TLS session that
+   * pairing set up earlier. */
   guint8 cmd[] = { VCSFW_CMD_REBOOT, 0x02, 0x00 };
 
   ps->reboot_pending = TRUE;
@@ -1289,26 +1448,6 @@ validity_pair_run_state (FpiSsm   *ssm,
 
     case PAIR_PARTITION_FLASH_RECV:
       pair_partition_flash_recv (ssm, self);
-      break;
-
-    case PAIR_FACTORY_RESET_SEND:
-      {
-        guint8 cmd[98];
-        FpiByteWriter writer;
-        fpi_byte_writer_init_with_data (&writer, cmd, sizeof (cmd), FALSE);
-        fpi_byte_writer_put_uint8 (&writer, 0x10);
-        fpi_byte_writer_fill (&writer, 0, sizeof (cmd) - 1);
-        vcsfw_cmd_send (self, ssm, cmd, sizeof (cmd), NULL);
-        break;
-      }
-
-    case PAIR_FACTORY_RESET_RECV:
-      if (self->cmd_response_status != VCSFW_STATUS_OK)
-        fp_warn ("Factory reset cmd 0x10 status=0x%04x",
-                 self->cmd_response_status);
-      else
-        fp_info ("Factory reset complete — rebooting sensor");
-      fpi_ssm_jump_to_state (ssm, PAIR_REBOOT_SEND);
       break;
 
     case PAIR_CMD50_SEND:

@@ -3454,6 +3454,252 @@ test_parse_flash_info_too_short (void)
 }
 
 /* ================================================================
+ * Pairing gate: partition-1 classification and the pairing decision
+ * ================================================================ */
+
+#define TEST_TLS_FLASH_SIZE 0x1000
+#define TEST_TLS_FLASH_RSP_HDR 6   /* [size:4LE][unknown:2] */
+#define TEST_TLS_FLASH_BODY 64
+
+/* Build a partition-1 READ_FLASH payload (after the status): the header,
+ * then blocks in the given order with valid SHA-256 hashes, then 0xFF (erased
+ * flash) up to 4096 bytes. */
+static guint8 *
+make_tls_flash_response (const guint16 *ids,
+                         gsize          n_ids,
+                         gsize         *out_len)
+{
+  guint8 *rsp = g_malloc (TEST_TLS_FLASH_RSP_HDR + TEST_TLS_FLASH_SIZE);
+  gsize off = TEST_TLS_FLASH_RSP_HDR;
+
+  FP_WRITE_UINT32_LE (rsp, TEST_TLS_FLASH_SIZE);
+  FP_WRITE_UINT16_LE (rsp + 4, 0);
+  memset (rsp + TEST_TLS_FLASH_RSP_HDR, 0xff, TEST_TLS_FLASH_SIZE);
+
+  for (gsize i = 0; i < n_ids; i++)
+    {
+      guint8 body[TEST_TLS_FLASH_BODY];
+      gsize hash_len = 32;
+      GChecksum *cs = g_checksum_new (G_CHECKSUM_SHA256);
+
+      memset (body, 0x10 + ids[i], sizeof (body));
+      FP_WRITE_UINT16_LE (rsp + off, ids[i]);
+      FP_WRITE_UINT16_LE (rsp + off + 2, sizeof (body));
+      g_checksum_update (cs, body, sizeof (body));
+      g_checksum_get_digest (cs, rsp + off + 4, &hash_len);
+      g_checksum_free (cs);
+      memcpy (rsp + off + TLS_FLASH_BLOCK_HEADER_SIZE, body, sizeof (body));
+      off += TLS_FLASH_BLOCK_HEADER_SIZE + sizeof (body);
+    }
+
+  *out_len = TEST_TLS_FLASH_RSP_HDR + TEST_TLS_FLASH_SIZE;
+  return rsp;
+}
+
+/* Offset in the payload of the n-th block written by the helper above */
+#define TEST_TLS_FLASH_BLOCK_OFF(n) \
+  (TEST_TLS_FLASH_RSP_HDR + (n) * (TLS_FLASH_BLOCK_HEADER_SIZE + TEST_TLS_FLASH_BODY))
+
+static void
+test_pair_classify_keys_present (void)
+{
+  /* Block order seen in USB captures of the HP Windows driver (06cb:00cb):
+   * a Windows-paired sensor has all three keys, so it is KEYS_PRESENT and
+   * never reaches the pairing path. */
+  const guint16 windows_order[] = { 0, 4, 3, 5, 1, 2, 6 };
+  gsize len;
+  g_autofree guint8 *rsp = make_tls_flash_response (windows_order,
+                                                    G_N_ELEMENTS (windows_order),
+                                                    &len);
+
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, rsp, len),
+                   ==, VALIDITY_TLS_FLASH_KEYS_PRESENT);
+}
+
+static void
+test_pair_classify_own_image (void)
+{
+  /* The image this driver writes when it pairs must classify as paired */
+  ValidityPairState state;
+  guint8 priv_blob[161], server_cert[184], ecdh_blob[400], ca_cert[420];
+  gsize flash_len;
+
+  validity_pair_state_init (&state);
+  memset (priv_blob, 0x02, sizeof (priv_blob));
+  memset (server_cert, 0x33, sizeof (server_cert));
+  memset (ecdh_blob, 0x66, sizeof (ecdh_blob));
+  memset (ca_cert, 0x55, sizeof (ca_cert));
+  state.priv_blob = priv_blob;
+  state.priv_blob_len = sizeof (priv_blob);
+  state.server_cert = server_cert;
+  state.server_cert_len = sizeof (server_cert);
+  state.ecdh_blob = ecdh_blob;
+  state.ecdh_blob_len = sizeof (ecdh_blob);
+
+  g_autofree guint8 *flash = validity_pair_build_tls_flash (&state, ca_cert,
+                                                            sizeof (ca_cert),
+                                                            &flash_len);
+  g_assert_nonnull (flash);
+
+  g_autofree guint8 *rsp = g_malloc (TEST_TLS_FLASH_RSP_HDR + flash_len);
+  FP_WRITE_UINT32_LE (rsp, flash_len);
+  FP_WRITE_UINT16_LE (rsp + 4, 0);
+  memcpy (rsp + TEST_TLS_FLASH_RSP_HDR, flash, flash_len);
+
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, rsp,
+                                                     TEST_TLS_FLASH_RSP_HDR + flash_len),
+                   ==, VALIDITY_TLS_FLASH_KEYS_PRESENT);
+
+  /* Stack buffers: do not let state_free touch them */
+  state.priv_blob = NULL;
+  state.server_cert = NULL;
+  state.ecdh_blob = NULL;
+  validity_pair_state_free (&state);
+}
+
+static void
+test_pair_classify_blank (void)
+{
+  gsize len;
+  g_autofree guint8 *rsp = make_tls_flash_response (NULL, 0, &len);
+
+  /* Erased partition: the first block header is the 0xFFFF end marker */
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, rsp, len),
+                   ==, VALIDITY_TLS_FLASH_BLANK);
+}
+
+static void
+test_pair_classify_partial (void)
+{
+  const guint16 no_priv[] = { 0, 3, 5, 6 };
+  const guint16 no_keys[] = { 0, 1, 2, 5 };
+  gsize len;
+  g_autofree guint8 *rsp1 = make_tls_flash_response (no_priv,
+                                                     G_N_ELEMENTS (no_priv),
+                                                     &len);
+  g_autofree guint8 *rsp2 = make_tls_flash_response (no_keys,
+                                                     G_N_ELEMENTS (no_keys),
+                                                     &len);
+
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, rsp1, len),
+                   ==, VALIDITY_TLS_FLASH_PARTIAL);
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, rsp2, len),
+                   ==, VALIDITY_TLS_FLASH_PARTIAL);
+}
+
+static void
+test_pair_classify_unreadable (void)
+{
+  const guint16 keys[] = { 3, 4, 6 };
+  gsize len;
+  g_autofree guint8 *rsp = make_tls_flash_response (keys, G_N_ELEMENTS (keys),
+                                                    &len);
+  guint8 hdr_only[TEST_TLS_FLASH_RSP_HDR] = { 0 };
+
+  /* A non-OK status wins, even over data that looks paired */
+  g_assert_cmpint (validity_pair_classify_tls_flash (0x0404, rsp, len),
+                   ==, VALIDITY_TLS_FLASH_UNREADABLE);
+
+  /* No payload, or not even the 6-byte response header */
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, NULL, 0),
+                   ==, VALIDITY_TLS_FLASH_UNREADABLE);
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, NULL, len),
+                   ==, VALIDITY_TLS_FLASH_UNREADABLE);
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, rsp,
+                                                     TEST_TLS_FLASH_RSP_HDR - 1),
+                   ==, VALIDITY_TLS_FLASH_UNREADABLE);
+
+  /* Header only, declaring no data: no end marker was seen, so not blank */
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, hdr_only,
+                                                     sizeof (hdr_only)),
+                   ==, VALIDITY_TLS_FLASH_UNREADABLE);
+}
+
+static void
+test_pair_classify_truncated (void)
+{
+  const guint16 keys[] = { 3, 4, 6 };
+  gsize len, cut;
+  g_autofree guint8 *rsp = make_tls_flash_response (keys, G_N_ELEMENTS (keys),
+                                                    &len);
+  g_autofree guint8 *blank = make_tls_flash_response (NULL, 0, &len);
+
+  /* Short read of an erased partition: declares 4096 bytes, delivers 100.
+   * Must not count as blank, since most of the partition was never read. */
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, blank,
+                                                     TEST_TLS_FLASH_RSP_HDR + 100),
+                   ==, VALIDITY_TLS_FLASH_UNREADABLE);
+
+  /* Short read that ends inside block 6: not partial, unreadable */
+  cut = TEST_TLS_FLASH_BLOCK_OFF (2) + TLS_FLASH_BLOCK_HEADER_SIZE + 10;
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, rsp, cut),
+                   ==, VALIDITY_TLS_FLASH_UNREADABLE);
+
+  /* Same cut, but the size field agrees with what arrived, so it is block 6
+   * itself that runs past the end of the data */
+  FP_WRITE_UINT32_LE (rsp, cut - TEST_TLS_FLASH_RSP_HDR);
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, rsp, cut),
+                   ==, VALIDITY_TLS_FLASH_UNREADABLE);
+
+  /* A short read that still holds all three keys is KEYS_PRESENT, as it was
+   * before; the TLS parse checks the blocks themselves afterwards. */
+  FP_WRITE_UINT32_LE (rsp, TEST_TLS_FLASH_SIZE);
+  cut = TEST_TLS_FLASH_BLOCK_OFF (3) + 8;
+  g_assert_cmpint (validity_pair_classify_tls_flash (VCSFW_STATUS_OK, rsp, cut),
+                   ==, VALIDITY_TLS_FLASH_KEYS_PRESENT);
+}
+
+static void
+test_pair_decide (void)
+{
+  const ValidityTlsFlashClass classes[] = {
+    VALIDITY_TLS_FLASH_KEYS_PRESENT,
+    VALIDITY_TLS_FLASH_BLANK,
+    VALIDITY_TLS_FLASH_PARTIAL,
+    VALIDITY_TLS_FLASH_UNREADABLE,
+  };
+  const guint16 partitioned[] = { 1, 5 };
+
+  /* No partitions: provision, as python-validity's init_flash does, except
+   * from a reconnect. Partition 1 is not read then, so its class is
+   * ignored. */
+  for (gsize i = 0; i < G_N_ELEMENTS (classes); i++)
+    {
+      g_assert_cmpint (validity_pair_decide (0, classes[i], FALSE),
+                       ==, VALIDITY_PAIR_PROVISION);
+      g_assert_cmpint (validity_pair_decide (0, classes[i], TRUE),
+                       ==, VALIDITY_PAIR_REFUSE_RECOVERY);
+    }
+
+  /* Partitioned: never paired, with or without check_only. Keys present
+   * needs nothing; every other class is refused. */
+  for (gsize p = 0; p < G_N_ELEMENTS (partitioned); p++)
+    {
+      for (gint check_only = 0; check_only <= 1; check_only++)
+        {
+          guint16 n = partitioned[p];
+
+          g_assert_cmpint (validity_pair_decide (n, VALIDITY_TLS_FLASH_KEYS_PRESENT,
+                                                 check_only),
+                           ==, VALIDITY_PAIR_NOT_NEEDED);
+          g_assert_cmpint (validity_pair_decide (n, VALIDITY_TLS_FLASH_BLANK,
+                                                 check_only),
+                           ==, VALIDITY_PAIR_REFUSE_BLANK);
+          g_assert_cmpint (validity_pair_decide (n, VALIDITY_TLS_FLASH_PARTIAL,
+                                                 check_only),
+                           ==, VALIDITY_PAIR_REFUSE_PARTIAL);
+          g_assert_cmpint (validity_pair_decide (n, VALIDITY_TLS_FLASH_UNREADABLE,
+                                                 check_only),
+                           ==, VALIDITY_PAIR_REFUSE_UNREADABLE);
+        }
+    }
+
+  /* An out-of-range class on a partitioned sensor is refused, not paired */
+  g_assert_cmpint (validity_pair_decide (5, (ValidityTlsFlashClass) 99, FALSE),
+                   ==, VALIDITY_PAIR_REFUSE_UNREADABLE);
+}
+
+/* ================================================================
  * T7.14: serialize_partition — known output format
  * ================================================================ */
 static void
@@ -3787,6 +4033,9 @@ test_pair_state_lifecycle (void)
   g_assert_null (state.priv_blob);
   g_assert_cmpuint (state.num_partitions, ==, 0);
   g_assert_cmpuint (state.erase_step, ==, 0);
+  g_assert_false (state.check_only);
+  g_assert_false (state.refused);
+  g_assert_cmpint (state.decision, ==, VALIDITY_PAIR_NOT_NEEDED);
 
   /* Free should be safe on empty state */
   validity_pair_state_free (&state);
@@ -5652,6 +5901,19 @@ main (int argc, char *argv[])
                    test_parse_flash_info_needs_pairing);
   g_test_add_func ("/validity/pair/parse-flash-info-too-short",
                    test_parse_flash_info_too_short);
+  g_test_add_func ("/validity/pair/classify-tls-flash/keys-present",
+                   test_pair_classify_keys_present);
+  g_test_add_func ("/validity/pair/classify-tls-flash/own-image",
+                   test_pair_classify_own_image);
+  g_test_add_func ("/validity/pair/classify-tls-flash/blank",
+                   test_pair_classify_blank);
+  g_test_add_func ("/validity/pair/classify-tls-flash/partial",
+                   test_pair_classify_partial);
+  g_test_add_func ("/validity/pair/classify-tls-flash/unreadable",
+                   test_pair_classify_unreadable);
+  g_test_add_func ("/validity/pair/classify-tls-flash/truncated",
+                   test_pair_classify_truncated);
+  g_test_add_func ("/validity/pair/decide", test_pair_decide);
   g_test_add_func ("/validity/pair/serialize-partition",
                    test_serialize_partition);
   g_test_add_func ("/validity/pair/make-cert-size",
