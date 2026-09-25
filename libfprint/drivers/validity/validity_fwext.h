@@ -95,8 +95,12 @@ gboolean validity_fwext_load_file (const gchar       *filename,
 
 void     validity_fwext_file_clear (ValidityFwextFile *fwext);
 
-const gchar *validity_fwext_get_firmware_name (guint16 vid,
-                                               guint16 pid);
+/* Firmware extension filename for @vid:@pid, or NULL if unknown. If @source
+ * is not NULL it is set to the vendor package that ships the file (NULL when
+ * the device is unknown), for error messages. */
+const gchar *validity_fwext_get_firmware_name (guint16       vid,
+                                               guint16       pid,
+                                               const gchar **source);
 
 gchar   *validity_fwext_find_firmware (guint16  vid,
                                        guint16  pid,

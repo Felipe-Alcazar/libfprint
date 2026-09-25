@@ -133,34 +133,92 @@ validity_fwext_parse_fw_info (const guint8   *data,
 
 /* ================================================================
  * Firmware filename mapping
+ *
+ * The firmware extension differs per OEM, and a chip can reject another
+ * OEM's file (06cb:00b7 answers Lenovo's with 044f, signature validation
+ * failed), so each device needs the right one. The files are not shipped
+ * with libfprint: the driver only names the vendor package that ships each
+ * file, for the missing-file error. Each package below was checked to
+ * contain its file.
+ *
+ * A sensor that has run the vendor driver (or python-validity) already has
+ * the extension in flash, so the upload only happens on a factory-empty or
+ * erased chip. The HP mappings follow python-validity PR #256; upstream
+ * python-validity has no HP devices. The uploads marked verified below were
+ * done by python-validity on real hardware; none has yet gone through this
+ * driver's upload path.
  * ================================================================ */
 
-const gchar *
-validity_fwext_get_firmware_name (guint16 vid,
-                                  guint16 pid)
+typedef struct
 {
-  if (vid == 0x138a && pid == 0x0090)
-    return "6_07f_Lenovo.xpfwext";
+  const gchar *filename;
+  const gchar *source;   /* vendor package that ships the file */
+} FwextFileEntry;
 
-  /* Lenovo variants */
-  if ((vid == 0x138a && (pid == 0x0097 || pid == 0x009d)) ||
-      (vid == 0x06cb && pid == 0x009a))
-    return "6_07f_lenovo_mis_qm.xpfwext";
+static const FwextFileEntry fwext_lenovo = {
+  "6_07f_Lenovo.xpfwext",
+  "Lenovo's fingerprint driver installer n1cgn08w.exe",
+};
 
-  /* HP variants. These sensors normally ship with the firmware extension
-   * pre-loaded, so the upload path only runs on a genuinely virgin (or
-   * factory-erased) device -- but on such a device the wrong OEM firmware is
-   * rejected (Signature validation failed), so the name has to be correct.
-   * Filenames per python-validity firmware_tables and confirmed on 06cb:00b7
-   * hardware (HP EliteBook 840 G6) by @gfiguero on MR !626. NB 138a:00ab spans
-   * two silicon variants (0x969 ZBook / 0xd51 EliteBook 840 G5); both map to
-   * the same HP file here, matching python-validity. */
-  if ((vid == 0x138a && pid == 0x00ab) ||
-      (vid == 0x06cb && pid == 0x00b7))
-    return "6_07f_hp_cmit_mis_qm.xpfwext";
-  if (vid == 0x06cb && (pid == 0x00cb || pid == 0x00d2))
-    return "6_07f_hp_mis_qm.xpfwext";
+static const FwextFileEntry fwext_lenovo_mis_qm = {
+  "6_07f_lenovo_mis_qm.xpfwext",
+  "Lenovo's fingerprint driver installer nz3gf09w.exe",
+};
 
+static const FwextFileEntry fwext_hp_cmit_mis_qm = {
+  "6_07f_hp_cmit_mis_qm.xpfwext",
+  "HP SoftPaq sp135736",
+};
+
+static const FwextFileEntry fwext_hp_mis_qm = {
+  "6_07f_hp_mis_qm.xpfwext",
+  "HP SoftPaq sp138431",
+};
+
+static const struct
+{
+  guint16               vid;
+  guint16               pid;
+  const FwextFileEntry *file;
+} fwext_device_map[] = {
+  { 0x138a, 0x0090, &fwext_lenovo },
+  { 0x138a, 0x0097, &fwext_lenovo_mis_qm },
+  { 0x138a, 0x009d, &fwext_lenovo_mis_qm },
+  { 0x06cb, 0x009a, &fwext_lenovo_mis_qm },
+
+  /* 138a:00ab spans two silicon variants. Verified on 0xd51 (EliteBook 840
+   * G5) in PR #256, from zero partitions through upload and enroll. NOT
+   * verified on 0x969 (ZBook Studio x360 G5): HP's driver for 00ab ships only
+   * this file, but no upload has been seen on that silicon. */
+  { 0x138a, 0x00ab, &fwext_hp_cmit_mis_qm },
+  /* Verified on 0xd51 (EliteBook 840 G6) by @gfiguero: the chip rejects the
+   * Lenovo file with 044f and accepts this one. */
+  { 0x06cb, 0x00b7, &fwext_hp_cmit_mis_qm },
+  /* Verified on 0x969 (Pavilion x360 14-dh), uploaded after a factory
+   * reset. */
+  { 0x06cb, 0x00cb, &fwext_hp_mis_qm },
+  /* NOT verified: same 0x969 silicon as 00cb, but sp138431 does not list
+   * 00d2 and no upload has been seen on it. */
+  { 0x06cb, 0x00d2, &fwext_hp_mis_qm },
+};
+
+const gchar *
+validity_fwext_get_firmware_name (guint16       vid,
+                                  guint16       pid,
+                                  const gchar **source)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (fwext_device_map); i++)
+    {
+      if (fwext_device_map[i].vid == vid && fwext_device_map[i].pid == pid)
+        {
+          if (source)
+            *source = fwext_device_map[i].file->source;
+          return fwext_device_map[i].file->filename;
+        }
+    }
+
+  if (source)
+    *source = NULL;
   return NULL;
 }
 
@@ -169,7 +227,8 @@ validity_fwext_find_firmware (guint16  vid,
                               guint16  pid,
                               GError **error)
 {
-  const gchar *filename = validity_fwext_get_firmware_name (vid, pid);
+  const gchar *source = NULL;
+  const gchar *filename = validity_fwext_get_firmware_name (vid, pid, &source);
 
   if (filename == NULL)
     {
@@ -189,12 +248,13 @@ validity_fwext_find_firmware (guint16  vid,
         }
     }
 
+  g_autofree gchar *searched = g_strjoinv (", ",
+                                           (gchar **) firmware_search_paths);
+
   g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_DATA_NOT_FOUND,
-               "Firmware file '%s' not found. "
-               "Search paths: /usr/share/libfprint/validity/, "
-               "/var/lib/python-validity/, /var/run/python-validity/. "
-               "Extract from Lenovo driver installer (nz3gf09w.exe).",
-               filename);
+               "Firmware file '%s' not found (looked in %s). "
+               "Extract it from %s.",
+               filename, searched, source);
   return NULL;
 }
 

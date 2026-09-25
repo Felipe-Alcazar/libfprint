@@ -105,6 +105,25 @@ verify_hmac (const guint8 *data,
   return diff == 0;
 }
 
+/* Comma-separated list of the search paths, each with @subdir appended when
+ * it is not NULL, for error messages: names exactly what was probed. */
+static gchar *
+format_search_paths (const gchar *subdir)
+{
+  GString *str = g_string_new (NULL);
+
+  for (const gchar **base = validity_data_search_paths; *base != NULL; base++)
+    {
+      g_autofree gchar *path = g_build_filename (*base, subdir, NULL);
+
+      if (str->len > 0)
+        g_string_append (str, ", ");
+      g_string_append (str, path);
+    }
+
+  return g_string_free (str, FALSE);
+}
+
 /* ================================================================
  * Public API
  * ================================================================ */
@@ -173,7 +192,7 @@ validity_data_load_device (ValidityDataStore *store,
                            GError           **error)
 {
   g_autofree gchar *subdir = g_strdup_printf ("%04x_%04x", vid, pid);
-  gboolean found_any = FALSE;
+  g_autofree gchar *found_dir = NULL;
 
   g_return_val_if_fail (store != NULL, FALSE);
 
@@ -184,7 +203,6 @@ validity_data_load_device (ValidityDataStore *store,
       if (!g_file_test (dir_path, G_FILE_TEST_IS_DIR))
         continue;
 
-      found_any = TRUE;
       fp_info ("Loading device data from %s", dir_path);
 
       for (gsize i = 0; i < G_N_ELEMENTS (device_blob_filenames); i++)
@@ -206,17 +224,18 @@ validity_data_load_device (ValidityDataStore *store,
             return FALSE;
         }
 
+      found_dir = g_steal_pointer (&dir_path);
       break;  /* Found directory — don't search further */
     }
 
-  if (!found_any)
+  if (found_dir == NULL)
     {
+      g_autofree gchar *probed = format_search_paths (subdir);
+
       g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_DATA_NOT_FOUND,
-                   "Device data files not found for %04x:%04x. "
-                   "Install the libfprint-validity-data package. "
-                   "Search paths: /usr/share/libfprint/validity/, "
-                   "/usr/local/share/libfprint/validity/",
-                   vid, pid);
+                   "Device data files not found for %04x:%04x (looked for "
+                   "%s). Install the libfprint-validity-data package.",
+                   vid, pid, probed);
       return FALSE;
     }
 
@@ -224,8 +243,7 @@ validity_data_load_device (ValidityDataStore *store,
   if (!store->entries[VALIDITY_DATA_INIT])
     {
       g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_DATA_NOT_FOUND,
-                   "Required file init.bin not found for %04x:%04x",
-                   vid, pid);
+                   "Required file init.bin not found in %s", found_dir);
       return FALSE;
     }
 
@@ -262,13 +280,13 @@ validity_data_load_common (ValidityDataStore *store,
 
       if (!found)
         {
+          g_autofree gchar *searched = format_search_paths (NULL);
+
           g_set_error (error, FP_DEVICE_ERROR,
                        FP_DEVICE_ERROR_DATA_NOT_FOUND,
-                       "Common data file '%s' not found. "
-                       "Install the libfprint-validity-data package. "
-                       "Search paths: /usr/share/libfprint/validity/, "
-                       "/usr/local/share/libfprint/validity/",
-                       filename);
+                       "Common data file '%s' not found (looked in %s). "
+                       "Install the libfprint-validity-data package.",
+                       filename, searched);
           return FALSE;
         }
     }

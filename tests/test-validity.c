@@ -1396,23 +1396,48 @@ test_hw_reg_read_parse (void)
 static void
 test_firmware_filename (void)
 {
+  static const struct
+  {
+    guint16      vid;
+    guint16      pid;
+    const gchar *name;
+    const gchar *source;
+  } cases[] = {
+    { 0x138a, 0x0090, "6_07f_Lenovo.xpfwext",
+      "Lenovo's fingerprint driver installer n1cgn08w.exe" },
+    { 0x138a, 0x0097, "6_07f_lenovo_mis_qm.xpfwext",
+      "Lenovo's fingerprint driver installer nz3gf09w.exe" },
+    { 0x138a, 0x009d, "6_07f_lenovo_mis_qm.xpfwext",
+      "Lenovo's fingerprint driver installer nz3gf09w.exe" },
+    { 0x06cb, 0x009a, "6_07f_lenovo_mis_qm.xpfwext",
+      "Lenovo's fingerprint driver installer nz3gf09w.exe" },
+    { 0x138a, 0x00ab, "6_07f_hp_cmit_mis_qm.xpfwext", "HP SoftPaq sp135736" },
+    { 0x06cb, 0x00b7, "6_07f_hp_cmit_mis_qm.xpfwext", "HP SoftPaq sp135736" },
+    { 0x06cb, 0x00cb, "6_07f_hp_mis_qm.xpfwext", "HP SoftPaq sp138431" },
+    { 0x06cb, 0x00d2, "6_07f_hp_mis_qm.xpfwext", "HP SoftPaq sp138431" },
+  };
   const gchar *name;
+  const gchar *source;
 
-  name = validity_fwext_get_firmware_name (0x06cb, 0x009a);
-  g_assert_cmpstr (name, ==, "6_07f_lenovo_mis_qm.xpfwext");
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++)
+    {
+      source = NULL;
+      name = validity_fwext_get_firmware_name (cases[i].vid, cases[i].pid,
+                                               &source);
+      g_assert_cmpstr (name, ==, cases[i].name);
+      g_assert_cmpstr (source, ==, cases[i].source);
 
-  name = validity_fwext_get_firmware_name (0x138a, 0x0090);
-  g_assert_cmpstr (name, ==, "6_07f_Lenovo.xpfwext");
+      /* The source is optional */
+      name = validity_fwext_get_firmware_name (cases[i].vid, cases[i].pid,
+                                               NULL);
+      g_assert_cmpstr (name, ==, cases[i].name);
+    }
 
-  name = validity_fwext_get_firmware_name (0x138a, 0x0097);
-  g_assert_cmpstr (name, ==, "6_07f_lenovo_mis_qm.xpfwext");
-
-  name = validity_fwext_get_firmware_name (0x138a, 0x009d);
-  g_assert_cmpstr (name, ==, "6_07f_lenovo_mis_qm.xpfwext");
-
-  /* Unknown PID should return NULL */
-  name = validity_fwext_get_firmware_name (0x1234, 0x5678);
+  /* Unknown PID should return NULL, and no source */
+  source = "unset";
+  name = validity_fwext_get_firmware_name (0x1234, 0x5678, &source);
   g_assert_null (name);
+  g_assert_null (source);
 }
 
 /* ================================================================
@@ -1442,6 +1467,51 @@ test_missing_firmware_file (void)
     {
       g_assert_no_error (error);
       g_assert_true (g_file_test (path, G_FILE_TEST_IS_REGULAR));
+    }
+}
+
+/* ================================================================
+ * T3.9a: test_missing_firmware_hint
+ *
+ * When the firmware file is missing, the error names the file, every
+ * search path (the list is built from the search-path array) and the
+ * vendor package for that particular file, not a Lenovo one for all.
+ * ================================================================ */
+static void
+test_missing_firmware_hint (void)
+{
+  static const struct
+  {
+    guint16 vid;
+    guint16 pid;
+  } devices[] = {
+    { 0x138a, 0x0090 },   /* Lenovo, not in the nz3gf09w.exe package */
+    { 0x06cb, 0x00b7 },   /* HP, cmit file */
+    { 0x06cb, 0x00cb },   /* HP, mis_qm file */
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (devices); i++)
+    {
+      g_autoptr(GError) error = NULL;
+      const gchar *source = NULL;
+      const gchar *name = validity_fwext_get_firmware_name (devices[i].vid,
+                                                            devices[i].pid,
+                                                            &source);
+      g_autofree gchar *path = validity_fwext_find_firmware (devices[i].vid,
+                                                             devices[i].pid,
+                                                             &error);
+
+      /* Installed on this machine -- nothing to check */
+      if (path != NULL)
+        continue;
+
+      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_DATA_NOT_FOUND);
+      g_assert_nonnull (strstr (error->message, name));
+      g_assert_nonnull (strstr (error->message, source));
+      g_assert_nonnull (strstr (error->message, "/usr/share/libfprint/validity"));
+      g_assert_nonnull (strstr (error->message, "/var/lib/python-validity"));
+      g_assert_nonnull (strstr (error->message, "/var/run/python-validity"));
+      g_assert_nonnull (strstr (error->message, "/usr/share/python-validity"));
     }
 }
 
@@ -5590,10 +5660,11 @@ test_data_load_device_missing (void)
 
   validity_data_store_init (&store);
 
-  /* Temporarily override search paths to a non-existent directory */
-  const gchar *saved = validity_data_search_paths[0];
+  /* Temporarily override search paths to non-existent directories */
+  const gchar *saved0 = validity_data_search_paths[0];
+  const gchar *saved1 = validity_data_search_paths[1];
   validity_data_search_paths[0] = "/tmp/nonexistent_validity_data_dir";
-  validity_data_search_paths[1] = NULL;
+  validity_data_search_paths[1] = "/tmp/nonexistent_validity_data_dir2";
 
   GError *error = NULL;
   gboolean ok = validity_data_load_device (&store, 0x06cb, 0x009a, &error);
@@ -5601,11 +5672,17 @@ test_data_load_device_missing (void)
   g_assert_false (ok);
   g_assert_nonnull (error);
   g_assert_cmpint (error->code, ==, FP_DEVICE_ERROR_DATA_NOT_FOUND);
+
+  /* The message names each directory that was probed */
+  g_assert_nonnull (strstr (error->message,
+                            "/tmp/nonexistent_validity_data_dir/06cb_009a"));
+  g_assert_nonnull (strstr (error->message,
+                            "/tmp/nonexistent_validity_data_dir2/06cb_009a"));
   g_error_free (error);
 
   /* Restore */
-  validity_data_search_paths[0] = saved;
-  validity_data_search_paths[1] = "/usr/local/share/libfprint/validity";
+  validity_data_search_paths[0] = saved0;
+  validity_data_search_paths[1] = saved1;
 
   validity_data_store_free (&store);
 }
@@ -5638,6 +5715,7 @@ test_data_load_device_missing_init (void)
   g_assert_false (ok);
   g_assert_nonnull (error);
   g_assert_cmpint (error->code, ==, FP_DEVICE_ERROR_DATA_NOT_FOUND);
+  g_assert_nonnull (strstr (error->message, devdir));
   g_error_free (error);
 
   validity_data_search_paths[0] = saved0;
@@ -5730,7 +5808,7 @@ test_data_load_common_missing (void)
   const gchar *saved0 = validity_data_search_paths[0];
   const gchar *saved1 = validity_data_search_paths[1];
   validity_data_search_paths[0] = "/tmp/nonexistent_validity_common_dir";
-  validity_data_search_paths[1] = NULL;
+  validity_data_search_paths[1] = "/tmp/nonexistent_validity_common_dir2";
 
   GError *error = NULL;
   gboolean ok = validity_data_load_common (&store, &error);
@@ -5738,6 +5816,13 @@ test_data_load_common_missing (void)
   g_assert_false (ok);
   g_assert_nonnull (error);
   g_assert_cmpint (error->code, ==, FP_DEVICE_ERROR_DATA_NOT_FOUND);
+
+  /* The message names the file and each search path */
+  g_assert_nonnull (strstr (error->message, "partition_sig_standard.bin"));
+  g_assert_nonnull (strstr (error->message,
+                            "/tmp/nonexistent_validity_common_dir,"));
+  g_assert_nonnull (strstr (error->message,
+                            "/tmp/nonexistent_validity_common_dir2"));
   g_error_free (error);
 
   validity_data_search_paths[0] = saved0;
@@ -6098,6 +6183,8 @@ main (int argc, char *argv[])
                    test_firmware_filename);
   g_test_add_func ("/validity/fwext/find-firmware/missing",
                    test_missing_firmware_file);
+  g_test_add_func ("/validity/fwext/find-firmware/missing-hint",
+                   test_missing_firmware_hint);
   g_test_add_func ("/validity/fwext/find-firmware/unsupported-pid",
                    test_unsupported_pid_firmware);
 
