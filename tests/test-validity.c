@@ -2908,6 +2908,7 @@ test_flash_parse_empty (void)
   g_assert_false (result);
   g_assert_nonnull (error);
   g_assert_false (tls.keys_loaded);
+  g_assert_false (tls.priv_key_mismatch);
 
   g_clear_error (&error);
   validity_tls_free (&tls);
@@ -2932,6 +2933,7 @@ test_flash_parse_truncated (void)
   /* Should fail due to block size exceeding remaining data */
   g_assert_false (result);
   g_assert_nonnull (error);
+  g_assert_false (tls.priv_key_mismatch);
   g_clear_error (&error);
 
   validity_tls_free (&tls);
@@ -3137,7 +3139,31 @@ test_flash_parse_needs_psk (void)
                                               &error);
   g_assert_false (result);
   g_assert_nonnull (error);
-  /* Should fail with HMAC-related error since PSK is all zeros */
+  /* Should fail with HMAC-related error since PSK is all zeros, and flag
+   * it as another host identity's pairing (open reports that case). */
+  g_assert_true (tls_no_psk.priv_key_mismatch);
+  g_clear_error (&error);
+
+  /* With the PSK the block was wrapped under, the HMAC passes: not a
+   * mismatch. (The dummy key then fails to unpad, so the parse still
+   * fails, for a different reason.) */
+  result = validity_tls_parse_flash (&tls_with_psk, flash->data, flash->len,
+                                     &error);
+  g_assert_false (result);
+  g_assert_nonnull (error);
+  g_assert_false (tls_with_psk.priv_key_mismatch);
+  g_clear_error (&error);
+
+  /* The flag describes the latest parse only: parsing again, now with the
+   * matching PSK, clears it. */
+  memcpy (tls_no_psk.psk_encryption_key, tls_with_psk.psk_encryption_key,
+          TLS_AES_KEY_SIZE);
+  memcpy (tls_no_psk.psk_validation_key, tls_with_psk.psk_validation_key,
+          TLS_AES_KEY_SIZE);
+  result = validity_tls_parse_flash (&tls_no_psk, flash->data, flash->len,
+                                     &error);
+  g_assert_false (result);
+  g_assert_false (tls_no_psk.priv_key_mismatch);
   g_clear_error (&error);
 
   g_byte_array_free (flash, TRUE);

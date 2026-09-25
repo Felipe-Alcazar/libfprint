@@ -642,8 +642,12 @@ handle_priv_block (ValidityTlsState *tls,
     EVP_MAC_free (hmac_mac);
   }
 
+  /* The block passed its SHA-256 check in parse_flash, so an HMAC failure
+   * means it was wrapped under a different PSK. The PSK's other inputs are
+   * fixed data-package constants, so that points to another host identity. */
   if (CRYPTO_memcmp (computed_mac, stored_mac, TLS_HMAC_SIZE) != 0)
     {
+      tls->priv_key_mismatch = TRUE;
       OPENSSL_cleanse (computed_mac, sizeof (computed_mac));
       g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_PROTO,
                    "TLS flash: private key HMAC failed — "
@@ -902,6 +906,7 @@ validity_tls_parse_flash (ValidityTlsState *tls,
 {
   FpiByteReader r;
 
+  tls->priv_key_mismatch = FALSE;
   fpi_byte_reader_init (&r, data, data_len);
 
   while (fpi_byte_reader_get_remaining (&r) >= TLS_FLASH_BLOCK_HEADER_SIZE)
@@ -1804,6 +1809,16 @@ validity_tls_flash_read_run_state (FpiSsm   *ssm,
        * We do NOT parse here — PSK derivation must happen first.
        * Parsing is done in OPEN_TLS_DERIVE_PSK after the PSK keys are
        * available for private key decryption. */
+      if (self->cmd_response_status != VCSFW_STATUS_OK)
+        {
+          /* Do not hand an error response to the flash parser */
+          fpi_ssm_mark_failed (ssm,
+                               fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                         "TLS flash read: status 0x%04x",
+                                                         self->cmd_response_status));
+          return;
+        }
+
       if (!self->cmd_response_data || self->cmd_response_len == 0)
         {
           fpi_ssm_mark_failed (ssm,

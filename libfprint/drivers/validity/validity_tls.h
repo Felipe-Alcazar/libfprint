@@ -124,6 +124,8 @@ typedef struct
   gboolean secure_tx;
   gboolean keys_loaded;
   gboolean session_broken;   /* chip sent a TLS alert -- session torn down */
+  gboolean priv_key_mismatch; /* last flash parse: block-4 HMAC failed under
+                               * this host's PSK (paired to another identity) */
 
   /* Runtime data keys (populated from data store during open) */
   const guint8 *password;       /* TLS password (32 bytes) */

@@ -222,6 +222,9 @@ err_close:
  *   6) Pairing check
  *   7) TLS handshake (works without fwext — uses partition 1 keys)
  *   8) Upload firmware extension via TLS (if not loaded)
+ *
+ * Open fails if no TLS session was established, except in emulation:
+ * without one the device cannot enroll, verify, list or delete.
  */
 
 typedef enum {
@@ -312,9 +315,12 @@ flash_read_ssm_done (FpiSsm   *ssm,
 
   if (error)
     {
-      fp_warn ("TLS flash read failed: %s — skipping TLS", error->message);
-      g_clear_error (&error);
-      fpi_ssm_jump_to_state (self->open_ssm, OPEN_DONE);
+      /* No keys means no TLS session, and every enroll, verify, list and
+       * delete runs over TLS: fail the open rather than report a device
+       * that cannot do anything. */
+      fp_warn ("TLS flash read failed: %s", error->message);
+      g_prefix_error (&error, "Could not read the sensor's TLS keys: ");
+      fpi_ssm_mark_failed (self->open_ssm, error);
       return;
     }
 
@@ -332,14 +338,17 @@ fwext_upload_ssm_done (FpiSsm   *ssm,
   if (error)
     {
       fp_warn ("Firmware extension upload failed: %s", error->message);
-      /* Non-fatal: capture/enroll/verify work fine on an already-provisioned
-       * sensor without re-uploading the fwext. Skip only the fwext step and
-       * continue with sensor identification and calibration -- jumping all the
-       * way to OPEN_DONE would skip OPEN_SENSOR_IDENTIFY, leaving
-       * self->sensor.type_info unset and asserting later in
-       * validity_capture_build_cmd_02(). This path is unconditional for devices
-       * whose .xpfwext is not distributed (e.g. 06cb:009a), so the crash hit on
-       * every open. */
+      /* Non-fatal: skip only the fwext step and continue with sensor
+       * identification and calibration -- jumping all the way to OPEN_DONE
+       * would skip OPEN_SENSOR_IDENTIFY, leaving self->sensor.type_info unset
+       * and asserting later in validity_capture_build_cmd_02(). TLS is
+       * already up here: OPEN_TLS_HANDSHAKE runs before this state, the
+       * upload only starts with a session, and its first two commands (the
+       * HW register write/read) go over TLS before it looks for the file.
+       * This path is unconditional for devices whose .xpfwext is not
+       * distributed (e.g. 06cb:009a reports no fwext loaded on every open),
+       * and enroll and verify were reported working there, over the session
+       * set up by OPEN_TLS_HANDSHAKE. */
       g_clear_error (&error);
       fpi_ssm_jump_to_state (self->open_ssm, OPEN_SENSOR_IDENTIFY);
       return;
@@ -390,7 +399,10 @@ pair_ssm_done (FpiSsm   *ssm,
         }
       else
         {
-          fp_warn ("Pairing failed: %s — continuing (device may not work)",
+          /* Not a refusal (e.g. GET_FLASH_INFO failed). Carry on to the TLS
+           * key read: if no session can be established, the open fails
+           * there or in OPEN_DONE. */
+          fp_warn ("Pairing failed: %s -- continuing to the TLS key read",
                    error->message);
           g_clear_error (&error);
         }
@@ -426,9 +438,13 @@ tls_handshake_ssm_done (FpiSsm   *ssm,
 
   if (error)
     {
-      fp_warn ("TLS handshake failed: %s — continuing without TLS",
-               error->message);
-      g_clear_error (&error);
+      /* Fail here rather than rely on the OPEN_DONE check: secure_rx is set
+       * when the server's ChangeCipherSpec arrives, before its Finished is
+       * verified, so a handshake that failed late can leave it TRUE. */
+      fp_warn ("TLS handshake failed: %s", error->message);
+      g_prefix_error (&error, "TLS handshake with the sensor failed: ");
+      fpi_ssm_mark_failed (self->open_ssm, error);
+      return;
     }
 
   fpi_ssm_next_state (self->open_ssm);
@@ -847,18 +863,36 @@ open_tls_derive_psk (FpiSsm            *ssm,
                                      flash_sz,
                                      &error))
         {
-          fp_warn ("TLS flash parse failed: %s — "
-                   "device may need pairing", error->message);
-          /* Non-fatal for now: skip TLS handshake */
-          g_clear_error (&error);
-          fpi_ssm_jump_to_state (ssm, OPEN_DONE);
+          fp_warn ("TLS flash parse failed: %s", error->message);
+          /* Keys wrapped under another host identity's PSK: never re-pair
+           * implicitly, since that erases the sensor. */
+          if (self->tls.priv_key_mismatch)
+            {
+              g_clear_error (&error);
+              error = fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                "The sensor is paired to a different "
+                                                "host identity: another OS on this "
+                                                "machine (such as Windows), another "
+                                                "machine, or a changed or unreadable "
+                                                "DMI product name or serial number. "
+                                                "Re-pairing it would erase the "
+                                                "fingerprints stored on the sensor, "
+                                                "so it is not done automatically");
+            }
+          else
+            {
+              g_prefix_error (&error, "The sensor's TLS keys are unusable: ");
+            }
+          fpi_ssm_mark_failed (ssm, error);
           return;
         }
     }
   else
     {
-      fp_warn ("No flash data available — skipping TLS");
-      fpi_ssm_jump_to_state (ssm, OPEN_DONE);
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                     "The sensor returned no TLS "
+                                                     "key data"));
       return;
     }
 
@@ -871,10 +905,12 @@ open_tls_handshake (FpiSsm            *ssm,
 {
   FpDevice *dev = FP_DEVICE (self);
 
+  /* Not expected: a successful parse always loads the keys */
   if (!self->tls.keys_loaded)
     {
-      fp_info ("TLS keys not loaded — skipping handshake");
-      fpi_ssm_jump_to_state (ssm, OPEN_DONE);
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                     "TLS keys not loaded"));
       return;
     }
 
@@ -889,7 +925,9 @@ static void
 open_sensor_identify (FpiSsm            *ssm,
                       FpiDeviceValidity *self)
 {
-  /* Without TLS, sensor identification is not possible */
+  /* Without TLS, sensor identification is not possible. Only emulation gets
+   * here without a session (it skips pairing and TLS); anything else is
+   * failed by the check in OPEN_DONE. */
   if (!self->tls.secure_rx)
     {
       fp_info ("No TLS session — skipping sensor identification");
@@ -1233,6 +1271,30 @@ open_calibrate_loop (FpiSsm            *ssm,
 }
 
 static void
+open_done (FpiSsm            *ssm,
+           FpiDeviceValidity *self)
+{
+  /* Every enroll, verify, list and delete runs over TLS, so an open without
+   * a session only defers the failure to the first action, where it shows up
+   * as an unrelated error. The steps above report their own cause when TLS
+   * cannot be set up; this catches any other path that gets here without a
+   * session. Emulation (umockdev) skips pairing and TLS by design and uses
+   * an in-memory print store instead. */
+  if (!self->tls.secure_rx &&
+      g_strcmp0 (g_getenv ("FP_DEVICE_EMULATION"), "1") != 0)
+    {
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                     "No TLS session with the "
+                                                     "sensor was established"));
+      return;
+    }
+
+  /* All init commands sent. Mark open complete. */
+  fpi_ssm_mark_completed (ssm);
+}
+
+static void
 open_run_state (FpiSsm   *ssm,
                 FpDevice *dev)
 {
@@ -1345,8 +1407,7 @@ open_run_state (FpiSsm   *ssm,
       break;
 
     case OPEN_DONE:
-      /* All init commands sent. Mark open complete. */
-      fpi_ssm_mark_completed (ssm);
+      open_done (ssm, self);
       break;
     }
 }
