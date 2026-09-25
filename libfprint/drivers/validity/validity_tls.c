@@ -788,14 +788,6 @@ handle_priv_block (ValidityTlsState *tls,
   for (gsize i = 0; i < TLS_EC_COORD_SIZE; i++)
     d_be[i] = d_le[TLS_EC_COORD_SIZE - 1 - i];
 
-  {
-    GString *hex = g_string_new ("TLS priv d(BE): ");
-    for (gsize i = 0; i < TLS_EC_COORD_SIZE; i++)
-      g_string_append_printf (hex, "%02x", d_be[i]);
-    fp_dbg ("%s", hex->str);
-    g_string_free (hex, TRUE);
-  }
-
   BIGNUM *d_bn = BN_bin2bn (d_be, TLS_EC_COORD_SIZE, NULL);
 
   /* Derive public key Q = d * G on P-256 */
@@ -1372,14 +1364,6 @@ validity_tls_build_client_finish (ValidityTlsState *tls, gsize *out_len)
   EVP_PKEY_derive (derive_ctx, NULL, &pms_len);
   EVP_PKEY_derive (derive_ctx, pre_master_secret, &pms_len);
   EVP_PKEY_CTX_free (derive_ctx);
-  {
-    GString *hex = g_string_new ("TLS pms: ");
-    for (gsize i = 0; i < pms_len; i++)
-      g_string_append_printf (hex, "%02x", pre_master_secret[i]);
-    g_string_append_printf (hex, " (len=%zu)", pms_len);
-    fp_dbg ("%s", hex->str);
-    g_string_free (hex, TRUE);
-  }
 
   /* ---- Derive master_secret and key_block ---- */
   {
@@ -1426,17 +1410,6 @@ validity_tls_build_client_finish (ValidityTlsState *tls, gsize *out_len)
   memcpy (tls->validation_key, key_block + 0x20, TLS_AES_KEY_SIZE);
   memcpy (tls->encryption_key, key_block + 0x40, TLS_AES_KEY_SIZE);
   memcpy (tls->decryption_key, key_block + 0x60, TLS_AES_KEY_SIZE);
-
-  {
-    GString *hex = g_string_new ("TLS sign_key: ");
-    for (gsize i = 0; i < 8; i++)
-      g_string_append_printf (hex, "%02x", tls->sign_key[i]);
-    g_string_append_printf (hex, "... enc_key: ");
-    for (gsize i = 0; i < 8; i++)
-      g_string_append_printf (hex, "%02x", tls->encryption_key[i]);
-    fp_dbg ("%s", hex->str);
-    g_string_free (hex, TRUE);
-  }
 
   OPENSSL_cleanse (pre_master_secret, sizeof (pre_master_secret));
   OPENSSL_cleanse (key_block, sizeof (key_block));
