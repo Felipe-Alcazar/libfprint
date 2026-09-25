@@ -825,6 +825,133 @@ test_parse_zero_length_payload (void)
   g_assert_null (result.header);
 }
 
+/* Mirror of the driver's reporting loop (enroll_report_progress): one
+ * report per stage from @reported + 1 up to @target. Returns the new
+ * high-water mark and counts the reports in @n_reports. */
+static gint
+report_progress_to (gint   reported,
+                    gint   target,
+                    guint *n_reports)
+{
+  while (reported < target)
+    {
+      reported++;
+      (*n_reports)++;
+    }
+
+  return reported;
+}
+
+/* ================================================================
+ * T8.10: enroll progress -- chip finishes before the nominal count
+ *
+ * A 5-frame enroll reports 1..4 as frames are accepted (the tid frame
+ * itself reports nothing), then catches up to N once stored: every stage
+ * is reported exactly once.
+ * ================================================================ */
+static void
+test_enroll_progress_short (void)
+{
+  gint reported = 0;
+  guint n_reports = 0;
+
+  for (guint frame = 1; frame < 5; frame++)
+    {
+      gint target = validity_enroll_progress_target (reported, frame, FALSE);
+
+      g_assert_cmpint (target, ==, (gint) frame);
+      reported = report_progress_to (reported, target, &n_reports);
+    }
+
+  reported = report_progress_to (reported,
+                                 validity_enroll_progress_target (reported, 5,
+                                                                  TRUE),
+                                 &n_reports);
+
+  g_assert_cmpint (reported, ==, VALIDITY_ENROLL_STAGES);
+  g_assert_cmpuint (n_reports, ==, VALIDITY_ENROLL_STAGES);
+}
+
+/* ================================================================
+ * T8.11: enroll progress -- chip wants more than the nominal count
+ *
+ * While frames are still wanted, progress holds at N - 1 (so retries and
+ * reports are not dropped by fprintd), and reaches N only on completion.
+ * ================================================================ */
+static void
+test_enroll_progress_long (void)
+{
+  gint reported = 0;
+  guint n_reports = 0;
+
+  for (guint frame = 1; frame <= 30; frame++)
+    {
+      gint target = validity_enroll_progress_target (reported, frame, FALSE);
+
+      g_assert_cmpint (target, <, VALIDITY_ENROLL_STAGES);
+      g_assert_cmpint (target, >=, reported);
+      reported = report_progress_to (reported, target, &n_reports);
+    }
+
+  g_assert_cmpint (reported, ==, VALIDITY_ENROLL_STAGES - 1);
+  g_assert_cmpuint (n_reports, ==, VALIDITY_ENROLL_STAGES - 1);
+
+  reported = report_progress_to (reported,
+                                 validity_enroll_progress_target (reported, 31,
+                                                                  TRUE),
+                                 &n_reports);
+
+  g_assert_cmpint (reported, ==, VALIDITY_ENROLL_STAGES);
+  g_assert_cmpuint (n_reports, ==, VALIDITY_ENROLL_STAGES);
+}
+
+/* ================================================================
+ * T8.12: enroll progress -- in-driver reconnect mid-enroll
+ *
+ * The reconnect restarts the chip's frame count from 0 but keeps the
+ * high-water mark, so stages already reported are not reported again and
+ * progress never moves backwards.
+ * ================================================================ */
+static void
+test_enroll_progress_reconnect (void)
+{
+  gint reported = 0;
+  guint n_reports = 0;
+
+  /* Four frames accepted, then the session is lost */
+  for (guint frame = 1; frame <= 4; frame++)
+    reported = report_progress_to (reported,
+                                   validity_enroll_progress_target (reported,
+                                                                    frame,
+                                                                    FALSE),
+                                   &n_reports);
+  g_assert_cmpint (reported, ==, 4);
+
+  /* Restarted enroll: frames 1..4 add nothing, frame 5 moves on */
+  for (guint frame = 1; frame <= 4; frame++)
+    {
+      gint target = validity_enroll_progress_target (reported, frame, FALSE);
+
+      g_assert_cmpint (target, ==, 4);
+      reported = report_progress_to (reported, target, &n_reports);
+    }
+  g_assert_cmpuint (n_reports, ==, 4);
+
+  reported = report_progress_to (reported,
+                                 validity_enroll_progress_target (reported, 5,
+                                                                  FALSE),
+                                 &n_reports);
+  g_assert_cmpint (reported, ==, 5);
+
+  /* Chip finishes on the restarted session's 6th frame */
+  reported = report_progress_to (reported,
+                                 validity_enroll_progress_target (reported, 6,
+                                                                  TRUE),
+                                 &n_reports);
+  g_assert_cmpint (reported, ==, VALIDITY_ENROLL_STAGES);
+  g_assert_cmpuint (n_reports, ==, VALIDITY_ENROLL_STAGES);
+}
+
 /* ================================================================
  * Tests: FWEXT
  * ================================================================ */
@@ -5918,6 +6045,12 @@ main (int argc, char *argv[])
                    test_result_clear);
   g_test_add_func ("/validity/enroll/parse-zero-length-payload",
                    test_parse_zero_length_payload);
+  g_test_add_func ("/validity/enroll/progress-short",
+                   test_enroll_progress_short);
+  g_test_add_func ("/validity/enroll/progress-long",
+                   test_enroll_progress_long);
+  g_test_add_func ("/validity/enroll/progress-reconnect",
+                   test_enroll_progress_reconnect);
 
 
   /* FWEXT tests */

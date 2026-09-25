@@ -306,6 +306,7 @@ struct _FpiDeviceValidity
   guint    scan_incomplete_count;
   gboolean enroll_frame_rejected;   /* sensor rejected the last frame (0x0526) -- retry stage */
   guint    enroll_reject_retries;   /* cumulative 0x0526 retries -- bounds broken-firmware loops */
+  gint     enroll_reported;         /* highest completed_stages reported this action */
 
   /* Verify: retry state for empty/phantom captures (no finger down) */
   guint    verify_capture_retries;
@@ -366,6 +367,14 @@ void     enrollment_update_result_clear (EnrollmentUpdateResult *r);
 gboolean parse_enrollment_update_response (const guint8           *data,
                                            gsize                   data_len,
                                            EnrollmentUpdateResult *result);
+
+/* Enroll progress to have reported after @frames accepted frames (@complete
+ * FALSE), or once the print is stored (@complete TRUE), given the stages
+ * already reported this action. Pure -- exposed for unit testing; the policy
+ * is described in validity_enroll.c. */
+gint     validity_enroll_progress_target (gint     reported,
+                                          guint    frames,
+                                          gboolean complete);
 
 /* Error classification for in-driver recovery ("Tier 0": reconnect and retry
  * inside the driver, with no libfprint core changes). Tier 0 covers a sensor

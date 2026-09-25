@@ -3,7 +3,7 @@
  *
  * Implements the FpDevice::enroll virtual method. The enrollment flow:
  *   1. Create enrollment session on sensor (cmd 0x69)
- *   2. Loop VALIDITY_ENROLL_STAGES times:
+ *   2. Loop until the sensor returns a template id (tid):
  *      a. LED on, build capture cmd, send via TLS
  *      b. Wait for finger-down interrupt (EP 0x83)
  *      c. Wait for scan-complete interrupt
@@ -47,6 +47,70 @@
 #define VALIDITY_ENROLL_MAX_REJECTS 30
 
 /* ================================================================
+ * Enroll progress
+ *
+ * The chip, not the host, decides when it has enough frames: it returns
+ * the template id (tid) once it is satisfied, and python-validity simply
+ * loops until the tid appears. Testers have seen it finish after 5, 6 and 8
+ * frames, and nothing stops it asking for more than VALIDITY_ENROLL_STAGES.
+ * nr_enroll_stages is therefore a nominal count.
+ *
+ * - While the chip still wants frames, reported progress is capped at
+ *   VALIDITY_ENROLL_STAGES - 1: fprintd drops any report with
+ *   completed_stages >= nr_enroll_stages (retries included), and "N of N"
+ *   would claim a finished enrollment.
+ * - Retry prompts repeat the last reported value, so they stay under the
+ *   cap and still reach the user on an enrollment longer than N frames.
+ * - On success the remaining stages are reported right before
+ *   fpi_device_enroll_complete, after the print is stored, so a UI that
+ *   counts stage-passed signals ends at 100% and a failure after the tid
+ *   never shows a full bar first. The synaptics driver catches up the same
+ *   way when its sensor's progress jumps.
+ * - enroll_reported is a high-water mark for the whole action. The
+ *   in-driver reconnect restarts the chip's enrollment from frame 0 but
+ *   re-dispatches the same action, so the mark survives it and is reset
+ *   only by a fresh enroll: stages the UI has already counted are not
+ *   reported twice.
+ * ================================================================ */
+
+gint
+validity_enroll_progress_target (gint     reported,
+                                 guint    frames,
+                                 gboolean complete)
+{
+  gint capped;
+
+  if (complete)
+    return VALIDITY_ENROLL_STAGES;
+
+  capped = (gint) MIN (frames, (guint) VALIDITY_ENROLL_STAGES - 1);
+
+  return MAX (reported, capped);
+}
+
+/* Report every stage from enroll_reported + 1 up to @target, one call each:
+ * fprintd turns each report into one stage-passed signal, and UIs such as
+ * GNOME's count those signals rather than read the value. */
+static void
+enroll_report_progress (FpiDeviceValidity *self,
+                        gint               target)
+{
+  while (self->enroll_reported < target)
+    {
+      self->enroll_reported++;
+      fpi_device_enroll_progress (FP_DEVICE (self), self->enroll_reported,
+                                  NULL, NULL);
+    }
+}
+
+static void
+enroll_report_retry (FpiDeviceValidity *self)
+{
+  fpi_device_enroll_progress (FP_DEVICE (self), self->enroll_reported, NULL,
+                              fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
+}
+
+/* ================================================================
  * Interrupt helpers — read from EP 0x83
  * ================================================================ */
 
@@ -86,9 +150,7 @@ interrupt_cb (FpiUsbTransfer *transfer,
                                    fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
               return;
             }
-          fpi_device_enroll_progress (
-            FP_DEVICE (self), self->enroll_stage, NULL,
-            fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
+          enroll_report_retry (self);
           /* Skip get_prg_status (only valid after complete scan) — go
            * straight to capture_stop → LED off → delay → LED on → retry */
           fpi_ssm_jump_to_state (ssm, ENROLL_CAPTURE_STOP);
@@ -613,8 +675,6 @@ static void
 enroll_loop_check (FpiSsm            *ssm,
                    FpiDeviceValidity *self)
 {
-  FpDevice *dev = FP_DEVICE (self);
-
   /* The sensor rejected the last frame (0x0526): report a retry and re-capture
    * the SAME stage without advancing progress, instead of failing the enroll.
    * This path deliberately skips the enroll_stage increment (and its upper
@@ -634,9 +694,7 @@ enroll_loop_check (FpiSsm            *ssm,
           return;
         }
 
-      fpi_device_enroll_progress (
-        dev, self->enroll_stage, NULL,
-        fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
+      enroll_report_retry (self);
       fp_info ("Enrollment frame rejected -- retrying stage %u", self->enroll_stage + 1);
       fpi_ssm_jump_to_state (ssm, ENROLL_LED_ON);
       return;
@@ -644,14 +702,11 @@ enroll_loop_check (FpiSsm            *ssm,
 
   self->enroll_stage++;
 
-  /* Report progress (capped at nr_enroll_stages for the UI) */
-  if (self->enroll_stage <= VALIDITY_ENROLL_STAGES)
-    fpi_device_enroll_progress (dev, self->enroll_stage, NULL, NULL);
+  fp_info ("Enrollment frame %u accepted (nominal %u stages)",
+           self->enroll_stage, VALIDITY_ENROLL_STAGES);
 
-  fp_info ("Enrollment stage %u/%u", self->enroll_stage,
-           VALIDITY_ENROLL_STAGES);
-
-  /* If we have a TID, enrollment is complete.
+  /* If we have a TID, enrollment is complete. The remaining progress is
+   * reported by enroll_ssm_done once the print is stored.
    * PY calls enrollment_update_end twice: once in the finally
    * block (ENROLL_UPDATE_END) and once more after the loop. */
   if (self->bulk_data && self->bulk_data_len > 0)
@@ -659,6 +714,11 @@ enroll_loop_check (FpiSsm            *ssm,
       fpi_ssm_jump_to_state (ssm, ENROLL_UPDATE_END2);
       return;
     }
+
+  enroll_report_progress (self,
+                          validity_enroll_progress_target (self->enroll_reported,
+                                                           self->enroll_stage,
+                                                           FALSE));
 
   /* PY loops indefinitely until TID appears.  Use a generous
    * upper bound to avoid an infinite loop on broken firmware. */
@@ -1447,6 +1507,10 @@ enroll_ssm_done (FpiSsm   *ssm,
   g_clear_pointer (&self->bulk_data, g_free);
   self->bulk_data_len = 0;
 
+  enroll_report_progress (self,
+                          validity_enroll_progress_target (self->enroll_reported,
+                                                           self->enroll_stage,
+                                                           TRUE));
   fpi_device_enroll_complete (dev, g_object_ref (print), NULL);
 }
 
@@ -1496,9 +1560,14 @@ validity_enroll (FpDevice *device)
     }
 
   if (self->recovery_redispatch)
-    self->recovery_redispatch = FALSE;   /* internal retry -- keep the budget */
+    {
+      self->recovery_redispatch = FALSE; /* internal retry -- keep the budget */
+    }
   else
-    self->reconnect_attempts = 0;        /* fresh action -- reset the budget */
+    {
+      self->reconnect_attempts = 0;      /* fresh action -- reset the budget */
+      self->enroll_reported = 0;         /* and the reported progress */
+    }
 
   ssm = fpi_ssm_new (device, enroll_run_state, ENROLL_NUM_STATES);
   fpi_ssm_start (ssm, enroll_ssm_done);
