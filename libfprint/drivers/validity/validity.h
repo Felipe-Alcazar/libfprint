@@ -306,8 +306,8 @@ struct _FpiDeviceValidity
   guint16  enroll_user_dbid;
   guint16  enroll_storage_dbid;
   guint    scan_incomplete_count;
-  gboolean enroll_frame_rejected;   /* sensor rejected the last frame (0x0526) -- retry stage */
-  guint    enroll_reject_retries;   /* cumulative 0x0526 retries -- bounds broken-firmware loops */
+  gboolean enroll_frame_rejected;   /* sensor rejected (0x0526) or flagged the last frame -- retry stage */
+  guint    enroll_reject_retries;   /* cumulative frame retries -- bounds broken-firmware loops */
   gint     enroll_reported;         /* highest completed_stages reported this action */
 
   /* Verify: retry state for empty/phantom captures (no finger down) */

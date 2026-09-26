@@ -41,9 +41,10 @@
 #include "validity.h"
 #include "vcsfw_protocol.h"
 
-/* Upper bound on consecutive 0x0526 (frame-rejected) retries before giving up,
- * so broken or hostile firmware that rejects every frame cannot loop forever.
- * Generous: a real enrollment never rejects anywhere near this many frames. */
+/* Upper bound on frame retries (0x0526 rejections and captures the sensor
+ * flagged as flawed) before giving up, so broken or hostile firmware that
+ * rejects every frame cannot loop forever. Generous: a real enrollment never
+ * rejects anywhere near this many frames. */
 #define VALIDITY_ENROLL_MAX_REJECTS 30
 
 /* ================================================================
@@ -503,7 +504,14 @@ enroll_capture_stop_recv (FpiSsm            *ssm,
                           FpiDeviceValidity *self)
 {
   /* PY: no glow_end after capture — LED stays on. */
-  if (self->scan_incomplete_count > 0)
+  if (self->enroll_frame_rejected)
+    /* The sensor flagged the capture: skip enrollment_update_start and the
+     * updates, so the frame never reaches the template. PY: capture()
+     * raised, and enroll()'s finally still runs enrollment_update_end
+     * before the loop re-captures, so go through ENROLL_UPDATE_END; its
+     * LOOP_CHECK reports the retry and re-captures the same stage. */
+    fpi_ssm_jump_to_state (ssm, ENROLL_UPDATE_END);
+  else if (self->scan_incomplete_count > 0)
     /* Incomplete scan: retry after a brief delay.
      * glow_start at the top of the loop will reinitialize.
      * PY: in the except block, just retries the whole loop. */
@@ -675,8 +683,9 @@ static void
 enroll_loop_check (FpiSsm            *ssm,
                    FpiDeviceValidity *self)
 {
-  /* The sensor rejected the last frame (0x0526): report a retry and re-capture
-   * the SAME stage without advancing progress, instead of failing the enroll.
+  /* The sensor rejected the last frame (0x0526), or flagged its capture as
+   * flawed: report a retry and re-capture the SAME stage without advancing
+   * progress, instead of failing the enroll.
    * This path deliberately skips the enroll_stage increment (and its upper
    * bound), so it needs its own cap: without one a device that returns 0x0526
    * on every frame would loop forever. A cancel still interrupts it, because
@@ -1065,8 +1074,12 @@ enroll_run_state (FpiSsm   *ssm,
       break;
 
     case ENROLL_GET_PRG_STATUS_RECV:
-      /* DIAG: log capture geometry/error to compare enroll vs verify capture
-       * quality. Response payload: len(4) | x(2) | y(2) | w1(2) | w2(2) | error(4). */
+      /* Capture status: len(4) | x(2) | y(2) | w1(2) | w2(2) | error(4).
+       * A non-zero error word means the sensor flagged the capture as
+       * flawed. python-validity's capture() raises "Scanning problem" on it
+       * and enroll() re-captures without submitting the frame; do the same.
+       * Mark the frame rejected so ENROLL_CAPTURE_STOP_RECV skips the
+       * enrollment update and ENROLL_LOOP_CHECK retries the stage. */
       if (self->cmd_response_data && self->cmd_response_len >= 16)
         {
           const guint8 *d = self->cmd_response_data;
@@ -1077,6 +1090,12 @@ enroll_run_state (FpiSsm   *ssm,
           guint32 err = d[12] | (d[13] << 8) | (d[14] << 16) | ((guint32) d[15] << 24);
           fp_dbg ("Enroll capture (stage %u): x=%u y=%u w1=%u w2=%u error=0x%08x",
                   self->enroll_stage, x, y, w1, w2, err);
+          if (err != 0)
+            {
+              fp_info ("Enroll capture flagged by the sensor (error=0x%08x) -- "
+                       "not submitting it", err);
+              self->enroll_frame_rejected = TRUE;
+            }
         }
       else
         {
