@@ -231,6 +231,12 @@ gboolean validity_db_parse_new_record_id (const guint8 *data,
 guint8 *validity_db_build_identity (const gchar *id_str,
                                     gsize       *out_len);
 
+/* Extract the id bytes from a user record's identity (the inverse of
+ * validity_db_build_identity). @out_id points into @user->identity. */
+gboolean validity_db_user_get_id (const ValidityUser *user,
+                                  const guint8      **out_id,
+                                  gsize              *out_id_len);
+
 /* Build finger data payload for new_finger (format from make_finger_data) */
 guint8 *validity_db_build_finger_data (guint16       subtype,
                                        const guint8 *template_data,

@@ -529,6 +529,38 @@ validity_db_build_identity (const gchar *id_str,
   return fpi_byte_writer_reset_and_get_data (&writer);
 }
 
+/* Extract the id bytes from a user record's identity blob, the inverse of
+ * validity_db_build_identity(): type(4LE) | len(4LE) | id_bytes(len).
+ * @out_id points into @user->identity. Returns FALSE if the record has no
+ * identity, or it is malformed or empty. The bytes are not validated as
+ * UTF-8 or NUL-free; compare them by length and content. */
+gboolean
+validity_db_user_get_id (const ValidityUser *user,
+                         const guint8      **out_id,
+                         gsize              *out_id_len)
+{
+  FpiByteReader reader;
+  guint32 id_type, id_len;
+  const guint8 *id;
+
+  g_return_val_if_fail (user != NULL, FALSE);
+  g_return_val_if_fail (out_id != NULL && out_id_len != NULL, FALSE);
+
+  if (!user->identity)
+    return FALSE;
+
+  fpi_byte_reader_init (&reader, user->identity, user->identity_len);
+  if (!fpi_byte_reader_get_uint32_le (&reader, &id_type) ||
+      !fpi_byte_reader_get_uint32_le (&reader, &id_len) ||
+      id_len == 0 ||
+      !fpi_byte_reader_get_data (&reader, id_len, &id))
+    return FALSE;
+
+  *out_id = id;
+  *out_id_len = id_len;
+  return TRUE;
+}
+
 /* Build finger data for new_finger (from python-validity make_finger_data)
  *
  * Format:

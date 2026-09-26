@@ -2573,80 +2573,303 @@ test_build_identity_valid_uuid (void)
 }
 
 /* ================================================================
- * R3: Gallery matching by subtype
+ * R3: Match correlation
  *
- * Identify must match by finger subtype, not just return the
- * first gallery entry.
+ * The chip matches against every template it holds. Verify and identify
+ * must report a match only for the print whose user record (identity)
+ * and finger the chip matched -- never for another finger of the same
+ * user, another user's same finger, or an arbitrary gallery entry.
  * ================================================================ */
+
+/* A user record as cmd 0x4a returns it: one record per enrollment, whose
+ * identity is the enrollment id string. */
 static void
-test_gallery_match_by_subtype (void)
+make_user_record (ValidityUser  *user,
+                  guint16        dbid,
+                  const gchar   *id,
+                  const guint16 *subtypes,
+                  guint16        n_fingers)
+{
+  memset (user, 0, sizeof (*user));
+  user->dbid = dbid;
+  if (id)
+    user->identity = validity_db_build_identity (id, &user->identity_len);
+  user->finger_count = n_fingers;
+  if (n_fingers > 0)
+    {
+      user->fingers = g_new0 (ValidityFingerEntry, n_fingers);
+      for (guint16 i = 0; i < n_fingers; i++)
+        {
+          user->fingers[i].dbid = dbid + 1 + i;
+          user->fingers[i].subtype = subtypes[i];
+          user->fingers[i].storage = 3;
+        }
+    }
+}
+
+/* A print as enroll leaves it: finger set, fpi-data = the id string. */
+static FpPrint *
+make_enrolled_print (FpDevice    *device,
+                     FpFinger     finger,
+                     const gchar *id)
+{
+  FpPrint *print = g_object_ref_sink (fp_print_new (device));
+
+  fp_print_set_finger (print, finger);
+  if (id)
+    g_object_set (print, "fpi-data", g_variant_new_string (id), NULL);
+  return print;
+}
+
+static void
+make_match (ValidityMatchResult *match,
+            guint32              user_dbid,
+            FpFinger             finger)
+{
+  memset (match, 0, sizeof (*match));
+  match->matched = TRUE;
+  match->user_dbid = user_dbid;
+  match->subtype = validity_finger_to_subtype (finger);
+}
+
+#define ID_LEFT_INDEX "FP1-20260926-2-1A2B3C4D-alice"
+#define ID_RIGHT_INDEX "FP1-20260723-7-5E6F7A8B-alice"
+#define ID_CAROL_RIGHT_INDEX "FP1-20260723-7-5E6F7A8B-carol"
+
+/* The chip matched the record and finger of the print being verified */
+static void
+test_match_record_same_print (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_LEFT_INDEX,
+                                                  ID_LEFT_INDEX);
+  const guint16 subtypes[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX) };
+  ValidityUser user;
+  ValidityMatchResult match;
+
+  make_user_record (&user, 10, ID_LEFT_INDEX, subtypes, 1);
+  make_match (&match, 10, FP_FINGER_LEFT_INDEX);
+
+  g_assert_true (validity_print_matches_record (print, &match, &user));
+
+  validity_user_clear (&user);
+}
+
+/* Same OS user, different finger: verify of the left index must fail when
+ * the chip matched the right-index enrollment (seen on hardware). */
+static void
+test_match_record_same_user_other_finger (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_LEFT_INDEX,
+                                                  ID_LEFT_INDEX);
+  const guint16 right[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  const guint16 both[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX),
+                           validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  ValidityUser user;
+  ValidityMatchResult match;
+
+  /* The right-index enrollment's own record */
+  make_user_record (&user, 8, ID_RIGHT_INDEX, right, 1);
+  make_match (&match, 8, FP_FINGER_RIGHT_INDEX);
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+  validity_user_clear (&user);
+
+  /* A record holding both fingers under the print's identity (as
+   * python-validity lays them out): the finger must still agree. */
+  make_user_record (&user, 10, ID_LEFT_INDEX, both, 2);
+  make_match (&match, 10, FP_FINGER_RIGHT_INDEX);
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+  validity_user_clear (&user);
+}
+
+/* Different user, same finger: identity must agree, not just the finger */
+static void
+test_match_record_other_user_same_finger (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_RIGHT_INDEX,
+                                                  ID_RIGHT_INDEX);
+  const guint16 subtypes[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  ValidityUser user;
+  ValidityMatchResult match;
+
+  make_user_record (&user, 12, ID_CAROL_RIGHT_INDEX, subtypes, 1);
+  make_match (&match, 12, FP_FINGER_RIGHT_INDEX);
+
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+
+  validity_user_clear (&user);
+}
+
+/* Anything that cannot be correlated is no match */
+static void
+test_match_record_no_correlation (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_LEFT_INDEX,
+                                                  ID_LEFT_INDEX);
+  g_autoptr(FpPrint) no_id = make_enrolled_print (device, FP_FINGER_LEFT_INDEX,
+                                                  NULL);
+  g_autoptr(FpPrint) empty_id = make_enrolled_print (device, FP_FINGER_LEFT_INDEX,
+                                                     "");
+  const guint16 subtypes[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX) };
+  const guint16 other[] = { validity_finger_to_subtype (FP_FINGER_LEFT_THUMB) };
+  ValidityUser user;
+  ValidityUser empty = { 0 };
+  ValidityMatchResult match;
+
+  make_user_record (&user, 10, ID_LEFT_INDEX, subtypes, 1);
+  make_match (&match, 10, FP_FINGER_LEFT_INDEX);
+
+  /* Print without an id string, or an empty one */
+  g_assert_false (validity_print_matches_record (no_id, &match, &user));
+  g_assert_false (validity_print_matches_record (empty_id, &match, &user));
+
+  /* No match reported, or no record read back */
+  match.matched = FALSE;
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+  match.matched = TRUE;
+  g_assert_false (validity_print_matches_record (print, &match, &empty));
+  g_assert_false (validity_print_matches_record (print, &match, NULL));
+  g_assert_false (validity_print_matches_record (NULL, &match, &user));
+
+  /* Record read back is not the one the chip named */
+  make_match (&match, 11, FP_FINGER_LEFT_INDEX);
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+  make_match (&match, 0x1000a, FP_FINGER_LEFT_INDEX);
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+  validity_user_clear (&user);
+
+  /* Identity that is only a prefix, or longer */
+  make_match (&match, 10, FP_FINGER_LEFT_INDEX);
+  make_user_record (&user, 10, "FP1-20260926-2-1A2B3C4D", subtypes, 1);
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+  validity_user_clear (&user);
+  make_user_record (&user, 10, ID_LEFT_INDEX "x", subtypes, 1);
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+  validity_user_clear (&user);
+
+  /* Record without an identity */
+  make_user_record (&user, 10, NULL, subtypes, 1);
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+  validity_user_clear (&user);
+
+  /* Record whose finger table lacks the matched subtype */
+  make_user_record (&user, 10, ID_LEFT_INDEX, other, 1);
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+  validity_user_clear (&user);
+
+  /* Chip reported no subtype (tag 3 absent) */
+  make_user_record (&user, 10, ID_LEFT_INDEX, subtypes, 1);
+  match.subtype = 0;
+  g_assert_false (validity_print_matches_record (print, &match, &user));
+  validity_user_clear (&user);
+}
+
+/* Identify returns the gallery print the match belongs to */
+static void
+test_gallery_match_correlates (void)
 {
   g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
   g_autoptr(GPtrArray) gallery = g_ptr_array_new_with_free_func (g_object_unref);
+  const guint16 left[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX) };
+  const guint16 right[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  ValidityUser user;
+  ValidityMatchResult match;
+  FpPrint *p_left, *p_right;
 
-  /* Create 3 prints with fingers: LEFT_THUMB(1), LEFT_INDEX(2), RIGHT_MIDDLE(8) */
-  FpPrint *p1 = fp_print_new (device);
-  fp_print_set_finger (p1, FP_FINGER_LEFT_THUMB);
-  g_ptr_array_add (gallery, g_object_ref_sink (p1));
+  p_left = make_enrolled_print (device, FP_FINGER_LEFT_INDEX, ID_LEFT_INDEX);
+  p_right = make_enrolled_print (device, FP_FINGER_RIGHT_INDEX, ID_RIGHT_INDEX);
+  g_ptr_array_add (gallery, p_left);
+  g_ptr_array_add (gallery, p_right);
 
-  FpPrint *p2 = fp_print_new (device);
-  fp_print_set_finger (p2, FP_FINGER_LEFT_INDEX);
-  g_ptr_array_add (gallery, g_object_ref_sink (p2));
+  make_user_record (&user, 8, ID_RIGHT_INDEX, right, 1);
+  make_match (&match, 8, FP_FINGER_RIGHT_INDEX);
+  g_assert_true (validity_find_gallery_match (gallery, &match, &user) == p_right);
+  validity_user_clear (&user);
 
-  FpPrint *p3 = fp_print_new (device);
-  fp_print_set_finger (p3, FP_FINGER_RIGHT_MIDDLE);
-  g_ptr_array_add (gallery, g_object_ref_sink (p3));
-
-  /* Subtype 2 = LEFT_INDEX → should match p2, not p1 */
-  guint16 subtype_left_index = validity_finger_to_subtype (FP_FINGER_LEFT_INDEX);
-  FpPrint *match = validity_find_gallery_match (gallery, subtype_left_index);
-  g_assert_true (match == p2);
-
-  /* Subtype 8 = RIGHT_MIDDLE → should match p3 */
-  guint16 subtype_right_middle = validity_finger_to_subtype (FP_FINGER_RIGHT_MIDDLE);
-  match = validity_find_gallery_match (gallery, subtype_right_middle);
-  g_assert_true (match == p3);
-
-  /* Subtype 1 = LEFT_THUMB → should match p1 */
-  guint16 subtype_left_thumb = validity_finger_to_subtype (FP_FINGER_LEFT_THUMB);
-  match = validity_find_gallery_match (gallery, subtype_left_thumb);
-  g_assert_true (match == p1);
+  make_user_record (&user, 10, ID_LEFT_INDEX, left, 1);
+  make_match (&match, 10, FP_FINGER_LEFT_INDEX);
+  g_assert_true (validity_find_gallery_match (gallery, &match, &user) == p_left);
+  validity_user_clear (&user);
 }
 
-/* ================================================================
- * R3b: Gallery match falls back to first when subtype doesn't match
- *
- * The sensor confirmed a match but the subtype can't be correlated
- * to any gallery entry — should fall back to first.
- * ================================================================ */
+/* A match that corresponds to no gallery print is no match: no fallback to
+ * the first entry, and no match on finger alone. */
 static void
-test_gallery_match_fallback (void)
+test_gallery_match_no_fallback (void)
 {
   g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
   g_autoptr(GPtrArray) gallery = g_ptr_array_new_with_free_func (g_object_unref);
+  const guint16 right[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  const guint16 ring[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_RING) };
+  ValidityUser user;
+  ValidityMatchResult match;
 
-  FpPrint *p1 = fp_print_new (device);
-  fp_print_set_finger (p1, FP_FINGER_LEFT_THUMB);
-  g_ptr_array_add (gallery, g_object_ref_sink (p1));
+  g_ptr_array_add (gallery, make_enrolled_print (device, FP_FINGER_LEFT_INDEX,
+                                                 ID_LEFT_INDEX));
+  g_ptr_array_add (gallery, make_enrolled_print (device, FP_FINGER_RIGHT_INDEX,
+                                                 ID_RIGHT_INDEX));
 
-  /* Subtype 9 = RIGHT_RING, not in gallery → should fall back to p1 */
-  guint16 subtype_right_ring = validity_finger_to_subtype (FP_FINGER_RIGHT_RING);
-  FpPrint *match = validity_find_gallery_match (gallery, subtype_right_ring);
-  g_assert_true (match == p1);
+  /* Another user's right index: same finger as a gallery print */
+  make_user_record (&user, 12, ID_CAROL_RIGHT_INDEX, right, 1);
+  make_match (&match, 12, FP_FINGER_RIGHT_INDEX);
+  g_assert_null (validity_find_gallery_match (gallery, &match, &user));
+  validity_user_clear (&user);
+
+  /* A finger in no gallery print */
+  make_user_record (&user, 14, "FP1-20260901-9-01020304-alice", ring, 1);
+  make_match (&match, 14, FP_FINGER_RIGHT_RING);
+  g_assert_null (validity_find_gallery_match (gallery, &match, &user));
+  validity_user_clear (&user);
 }
 
-/* ================================================================
- * R3c: Gallery match with NULL/empty gallery
- *
- * Should return NULL when gallery is empty or NULL.
- * ================================================================ */
+/* NULL or empty gallery */
 static void
 test_gallery_match_empty (void)
 {
   g_autoptr(GPtrArray) empty = g_ptr_array_new_with_free_func (g_object_unref);
+  const guint16 subtypes[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX) };
+  ValidityUser user;
+  ValidityMatchResult match;
 
-  g_assert_null (validity_find_gallery_match (NULL, 1));
-  g_assert_null (validity_find_gallery_match (empty, 1));
+  make_user_record (&user, 10, ID_LEFT_INDEX, subtypes, 1);
+  make_match (&match, 10, FP_FINGER_LEFT_INDEX);
+
+  g_assert_null (validity_find_gallery_match (NULL, &match, &user));
+  g_assert_null (validity_find_gallery_match (empty, &match, &user));
+
+  validity_user_clear (&user);
+}
+
+/* The record identity round-trips through the builder, and malformed
+ * identities are refused. */
+static void
+test_user_get_id (void)
+{
+  ValidityUser user = { 0 };
+  const guint8 *id;
+  gsize id_len;
+  const guint8 truncated[] = { 3, 0, 0, 0, 10, 0, 0, 0, 'a', 'b' };
+  const guint8 zero_len[] = { 3, 0, 0, 0, 0, 0, 0, 0 };
+
+  g_assert_false (validity_db_user_get_id (&user, &id, &id_len));
+
+  user.identity = validity_db_build_identity (ID_LEFT_INDEX, &user.identity_len);
+  g_assert_true (validity_db_user_get_id (&user, &id, &id_len));
+  g_assert_cmpmem (id, id_len, ID_LEFT_INDEX, strlen (ID_LEFT_INDEX));
+  g_clear_pointer (&user.identity, g_free);
+
+  user.identity = g_memdup2 (truncated, sizeof (truncated));
+  user.identity_len = sizeof (truncated);
+  g_assert_false (validity_db_user_get_id (&user, &id, &id_len));
+  g_clear_pointer (&user.identity, g_free);
+
+  user.identity = g_memdup2 (zero_len, sizeof (zero_len));
+  user.identity_len = sizeof (zero_len);
+  g_assert_false (validity_db_user_get_id (&user, &id, &id_len));
+  g_clear_pointer (&user.identity, g_free);
 }
 
 /* ================================================================
@@ -6255,13 +6478,23 @@ main (int argc, char *argv[])
   g_test_add_func ("/validity/verify/build_identity_valid_uuid",
                    test_build_identity_valid_uuid);
 
-  /* R3: gallery matching */
-  g_test_add_func ("/validity/verify/gallery_match_by_subtype",
-                   test_gallery_match_by_subtype);
-  g_test_add_func ("/validity/verify/gallery_match_fallback",
-                   test_gallery_match_fallback);
+  /* R3: match correlation */
+  g_test_add_func ("/validity/verify/match_record_same_print",
+                   test_match_record_same_print);
+  g_test_add_func ("/validity/verify/match_record_same_user_other_finger",
+                   test_match_record_same_user_other_finger);
+  g_test_add_func ("/validity/verify/match_record_other_user_same_finger",
+                   test_match_record_other_user_same_finger);
+  g_test_add_func ("/validity/verify/match_record_no_correlation",
+                   test_match_record_no_correlation);
+  g_test_add_func ("/validity/verify/gallery_match_correlates",
+                   test_gallery_match_correlates);
+  g_test_add_func ("/validity/verify/gallery_match_no_fallback",
+                   test_gallery_match_no_fallback);
   g_test_add_func ("/validity/verify/gallery_match_empty",
                    test_gallery_match_empty);
+  g_test_add_func ("/validity/verify/user_get_id",
+                   test_user_get_id);
 
   /* R4: struct field separation */
   g_test_add_func ("/validity/verify/struct_separate_fields",

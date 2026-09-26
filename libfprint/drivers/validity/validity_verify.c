@@ -14,7 +14,9 @@
  *   7. Get match result (cmd 0x60)
  *   8. Match cleanup (cmd 0x62)
  *   9. LED off
- *   10. Report result
+ *   10. Read back the matched user record (cmd 0x4A)
+ *   11. Report result: a match only for the print whose user record and
+ *       finger the chip matched
  *
  * The difference between verify and identify is only in how the
  * result is reported to libfprint.
@@ -308,34 +310,99 @@ validity_parse_match_result (const guint8        *data,
 }
 
 /**
+ * validity_print_matches_record:
+ * @print: an enrolled print (from enroll, list, or deserialised)
+ * @match: the chip's match result (cmd 0x60)
+ * @user: the user record @match names, read back with cmd 0x4a
+ *
+ * The match command searches every template on the chip (python-validity
+ * match_finger(): stg_id = usr_id = 0), so a match only says that *some*
+ * enrolled finger matched. Decide whether it was @print's.
+ *
+ * Every enrollment creates its own user record whose identity is the id
+ * string that enroll also stores as the print's fpi-data, so the match is
+ * @print's only if all of these hold:
+ *   - @user is the record the chip named (@match->user_dbid),
+ *   - the record's identity equals @print's fpi-data id string,
+ *   - the matched finger subtype is @print's finger, and the record holds
+ *     a finger of that subtype.
+ * Anything short of that, including a print with no id string, is not a
+ * match. python-validity's VerifyStart makes the same check on the user
+ * record (usr.dbid == usrid).
+ *
+ * Returns: %TRUE if the chip's match is a match for @print
+ */
+gboolean
+validity_print_matches_record (FpPrint                   *print,
+                               const ValidityMatchResult *match,
+                               const ValidityUser        *user)
+{
+  g_autoptr(GVariant) data = NULL;
+  const gchar *print_id;
+  gsize print_id_len;
+  const guint8 *record_id;
+  gsize record_id_len;
+  gboolean has_finger = FALSE;
+
+  if (!print || !match || !match->matched || !user)
+    return FALSE;
+
+  if (user->dbid != match->user_dbid)
+    return FALSE;
+
+  g_object_get (print, "fpi-data", &data, NULL);
+  if (!data || !g_variant_is_of_type (data, G_VARIANT_TYPE_STRING))
+    return FALSE;
+
+  print_id = g_variant_get_string (data, &print_id_len);
+  if (print_id_len == 0)
+    return FALSE;
+
+  if (!validity_db_user_get_id (user, &record_id, &record_id_len) ||
+      record_id_len != print_id_len ||
+      memcmp (record_id, print_id, print_id_len) != 0)
+    return FALSE;
+
+  if (validity_finger_to_subtype (fp_print_get_finger (print)) != match->subtype)
+    return FALSE;
+
+  for (guint16 i = 0; i < user->finger_count; i++)
+    if (user->fingers[i].subtype == match->subtype)
+      has_finger = TRUE;
+
+  return has_finger;
+}
+
+/**
  * validity_find_gallery_match:
  * @gallery: (element-type FpPrint): array of gallery prints
- * @subtype: sensor finger subtype from match result
+ * @match: the chip's match result (cmd 0x60)
+ * @user: the user record @match names
  *
- * Find the gallery print whose finger matches the given sensor subtype.
- * Falls back to the first gallery entry if no subtype match is found
- * (the sensor confirmed a match; we just can't correlate the subtype).
+ * Find the gallery print the chip's match belongs to, as decided by
+ * validity_print_matches_record(). The chip can match a finger that is not
+ * in the gallery (another user's print, or one the caller left out), so
+ * there is no fallback: an uncorrelated match is no match.
  *
- * Returns: (nullable): the matching FpPrint, or %NULL if gallery is empty
+ * Returns: (nullable): the matching FpPrint, or %NULL if none corresponds
  */
 FpPrint *
-validity_find_gallery_match (GPtrArray *gallery,
-                             guint16    subtype)
+validity_find_gallery_match (GPtrArray                 *gallery,
+                             const ValidityMatchResult *match,
+                             const ValidityUser        *user)
 {
-  if (!gallery || gallery->len == 0)
+  if (!gallery)
     return NULL;
-
-  gint matched_finger = validity_subtype_to_finger (subtype);
 
   for (guint i = 0; i < gallery->len; i++)
     {
       FpPrint *candidate = g_ptr_array_index (gallery, i);
-      if (fp_print_get_finger (candidate) == (FpFinger) matched_finger)
+
+      if (validity_print_matches_record (candidate, match, user))
         return candidate;
     }
 
-  /* Fallback: sensor confirmed a match but we can't correlate the subtype */
-  return g_ptr_array_index (gallery, 0);
+  return NULL;
 }
 
 /* ================================================================
@@ -419,6 +486,54 @@ verify_get_result_recv (FpiSsm            *ssm,
 }
 
 static void
+verify_get_match_user (FpiSsm            *ssm,
+                       FpiDeviceValidity *self)
+{
+  /* The chip names the matched user record but not which print it belongs
+   * to; read the record back so verify_ssm_done can compare its identity
+   * with the print(s) being matched. Nothing to read on a no-match. */
+  MatchResult match = { 0 };
+  gboolean have_match = FALSE;
+
+  if (self->bulk_data && self->bulk_data_len > 0)
+    if (validity_parse_match_result (self->bulk_data, self->bulk_data_len, &match))
+      have_match = match.matched;
+
+  if (!have_match || match.user_dbid > G_MAXUINT16)
+    {
+      match_result_clear (&match);
+      fpi_ssm_jump_to_state (ssm, VERIFY_DONE);
+      return;
+    }
+
+  {
+    gsize cmd_len;
+    guint8 *cmd = validity_db_build_cmd_get_user ((guint16) match.user_dbid,
+                                                  &cmd_len);
+    vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
+    g_free (cmd);
+  }
+  match_result_clear (&match);
+}
+
+static void
+verify_get_match_user_recv (FpiSsm            *ssm,
+                            FpiDeviceValidity *self)
+{
+  /* On failure verify_match_user stays empty, which correlates with no
+   * print: the match is reported as no match. */
+  if (self->cmd_response_status != VCSFW_STATUS_OK ||
+      !self->cmd_response_data ||
+      !validity_db_parse_user (self->cmd_response_data,
+                               self->cmd_response_len,
+                               &self->verify_match_user))
+    fp_warn ("Could not read the matched user record (status=0x%04x)",
+             self->cmd_response_status);
+
+  fpi_ssm_next_state (ssm);
+}
+
+static void
 verify_run_state (FpiSsm   *ssm,
                   FpDevice *dev)
 {
@@ -429,6 +544,11 @@ verify_run_state (FpiSsm   *ssm,
     case VERIFY_LED_ON:
       self->verify_capture_retries = 0;
       self->verify_recapture = FALSE;
+      /* The match decision must come from this attempt's get_match_result
+       * alone; drop anything an earlier action left behind. */
+      g_clear_pointer (&self->bulk_data, g_free);
+      self->bulk_data_len = 0;
+      validity_user_clear (&self->verify_match_user);
       {
         gsize cmd_len;
         const guint8 *cmd = validity_capture_glow_start_cmd (&cmd_len);
@@ -593,6 +713,14 @@ verify_run_state (FpiSsm   *ssm,
       fpi_ssm_next_state (ssm);
       break;
 
+    case VERIFY_GET_MATCH_USER:
+      verify_get_match_user (ssm, self);
+      break;
+
+    case VERIFY_GET_MATCH_USER_RECV:
+      verify_get_match_user_recv (ssm, self);
+      break;
+
     case VERIFY_DONE:
       fpi_ssm_mark_completed (ssm);
       break;
@@ -639,6 +767,7 @@ verify_ssm_done (FpiSsm   *ssm,
     {
       g_clear_pointer (&self->bulk_data, g_free);
       self->bulk_data_len = 0;
+      validity_user_clear (&self->verify_match_user);
 
       /* Recoverable mid-operation reset? Reconnect and retry instead of
        * failing the action (bounded; a true removal falls through). */
@@ -665,44 +794,56 @@ verify_ssm_done (FpiSsm   *ssm,
     if (validity_parse_match_result (self->bulk_data, self->bulk_data_len, &match))
       have_match = match.matched;
 
+  /* The chip matched against every template it holds, so a match is only a
+   * match for the print(s) being checked if the matched user record belongs
+   * to one of them (see validity_print_matches_record). */
   if (self->identify_mode)
     {
+      FpPrint *gallery_match = NULL;
+
       if (have_match)
         {
-          fp_info ("Identify matched: user_dbid=%u subtype=%u",
-                   match.user_dbid, match.subtype);
-
-          /* Match the sensor result against the gallery by comparing
-           * the finger subtype. The sensor does the actual 1:N match
-           * internally; we just need to find which gallery FpPrint
-           * corresponds to the matched subtype. */
           GPtrArray *gallery = NULL;
 
           fpi_device_get_identify_data (dev, &gallery);
+          gallery_match = validity_find_gallery_match (gallery, &match,
+                                                       &self->verify_match_user);
 
-          FpPrint *gallery_match = validity_find_gallery_match (
-            gallery, match.subtype);
-
-          fpi_device_identify_report (dev, gallery_match, NULL, NULL);
+          if (gallery_match)
+            fp_info ("Identify matched: user_dbid=%u subtype=%u",
+                     match.user_dbid, match.subtype);
+          else
+            fp_info ("Identify: chip matched user_dbid=%u subtype=%u, "
+                     "which is no print in the gallery -- no match",
+                     match.user_dbid, match.subtype);
         }
-      else
-        {
-          fpi_device_identify_report (dev, NULL, NULL, NULL);
-        }
 
+      fpi_device_identify_report (dev, gallery_match, NULL, NULL);
       fpi_device_identify_complete (dev, NULL);
     }
   else
     {
       /* Verify mode */
-      if (have_match)
+      FpPrint *print = NULL;
+
+      fpi_device_get_verify_data (dev, &print);
+
+      if (have_match &&
+          validity_print_matches_record (print, &match,
+                                         &self->verify_match_user))
         {
-          fp_info ("Verify matched: user_dbid=%u", match.user_dbid);
+          fp_info ("Verify matched: user_dbid=%u subtype=%u",
+                   match.user_dbid, match.subtype);
           fpi_device_verify_report (dev, FPI_MATCH_SUCCESS, NULL, NULL);
         }
       else
         {
-          fp_info ("Verify: no match");
+          if (have_match)
+            fp_info ("Verify: chip matched user_dbid=%u subtype=%u, "
+                     "which is not the print being verified -- no match",
+                     match.user_dbid, match.subtype);
+          else
+            fp_info ("Verify: no match");
           fpi_device_verify_report (dev, FPI_MATCH_FAIL, NULL, NULL);
         }
 
@@ -710,6 +851,7 @@ verify_ssm_done (FpiSsm   *ssm,
     }
 
   match_result_clear (&match);
+  validity_user_clear (&self->verify_match_user);
   g_clear_pointer (&self->bulk_data, g_free);
   self->bulk_data_len = 0;
 }
@@ -950,32 +1092,26 @@ list_get_user_recv (FpiSsm            *ssm,
               /* Set fpi-data to the identity id string, matching what
                * enroll stores (g_variant_new_string(user_id)), so the print
                * serialises and fp_print_equal() can match it against a saved
-               * print. Identity blob: type(4LE) | len(4LE) | id_bytes[len]. */
-              if (user.identity && user.identity_len >= 8)
-                {
-                  FpiByteReader idr;
-                  guint32 id_type = 0, id_len = 0;
-                  const guint8 *id_bytes = NULL;
+               * print. */
+              {
+                const guint8 *id_bytes = NULL;
+                gsize id_len = 0;
 
-                  fpi_byte_reader_init (&idr, user.identity, user.identity_len);
-                  if (fpi_byte_reader_get_uint32_le (&idr, &id_type) &&
-                      fpi_byte_reader_get_uint32_le (&idr, &id_len) &&
-                      id_len > 0 &&
-                      fpi_byte_reader_get_data (&idr, id_len, &id_bytes))
-                    {
-                      g_autofree gchar *id =
-                        g_strndup ((const gchar *) id_bytes, id_len);
-                      /* The id comes straight off the device. g_variant_new_string
-                       * aborts (g_critical) on non-UTF-8 input, so validate first;
-                       * a print with unset fpi-data simply won't match, which is the
-                       * right outcome for a garbage record. */
-                      if (g_utf8_validate (id, -1, NULL))
-                        g_object_set (print, "fpi-data",
-                                      g_variant_new_string (id), NULL);
-                      else
-                        fp_warn ("Skipping non-UTF-8 identity in stored print");
-                    }
-                }
+                if (validity_db_user_get_id (&user, &id_bytes, &id_len))
+                  {
+                    g_autofree gchar *id =
+                      g_strndup ((const gchar *) id_bytes, id_len);
+                    /* The id comes straight off the device. g_variant_new_string
+                     * aborts (g_critical) on non-UTF-8 input, so validate first;
+                     * a print with unset fpi-data simply won't match, which is the
+                     * right outcome for a garbage record. */
+                    if (g_utf8_validate (id, -1, NULL))
+                      g_object_set (print, "fpi-data",
+                                    g_variant_new_string (id), NULL);
+                    else
+                      fp_warn ("Skipping non-UTF-8 identity in stored print");
+                  }
+              }
 
               g_ptr_array_add (prints_array, print);
             }

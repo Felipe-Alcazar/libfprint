@@ -209,6 +209,8 @@ typedef enum {
   VERIFY_CLEANUP_RECV,
   VERIFY_LED_OFF,
   VERIFY_LED_OFF_RECV,
+  VERIFY_GET_MATCH_USER,       /* read the matched user record (cmd 0x4a) */
+  VERIFY_GET_MATCH_USER_RECV,
   VERIFY_DONE,
   VERIFY_NUM_STATES,
 } ValidityVerifyState;
@@ -314,6 +316,10 @@ struct _FpiDeviceValidity
 
   /* Verify/identify mode flag: TRUE = identify, FALSE = verify */
   gboolean identify_mode;
+
+  /* Verify/identify: the user record the chip's match named, read back to
+   * tell which enrolled print matched */
+  ValidityUser verify_match_user;
 
   /* List prints state */
   ValidityUserStorage list_storage;
@@ -434,6 +440,10 @@ void validity_list (FpDevice *device);
 void validity_delete (FpDevice *device);
 void validity_clear_storage (FpDevice *device);
 
-/* Gallery matching helper (validity_verify.c) */
-FpPrint *validity_find_gallery_match (GPtrArray *gallery,
-                                      guint16    subtype);
+/* Match correlation helpers (validity_verify.c) -- exposed for unit testing */
+gboolean validity_print_matches_record (FpPrint                   *print,
+                                        const ValidityMatchResult *match,
+                                        const ValidityUser        *user);
+FpPrint *validity_find_gallery_match (GPtrArray                 *gallery,
+                                      const ValidityMatchResult *match,
+                                      const ValidityUser        *user);

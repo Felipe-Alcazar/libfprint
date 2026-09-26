@@ -1627,6 +1627,7 @@ validity_release_state (FpiDeviceValidity *self)
   g_clear_pointer (&self->bulk_data, g_free);
   self->bulk_data_len = 0;
   validity_user_storage_clear (&self->list_storage);
+  validity_user_clear (&self->verify_match_user);
 
   validity_capture_state_clear (&self->capture);
   validity_sensor_state_clear (&self->sensor);
