@@ -2873,6 +2873,216 @@ test_user_get_id (void)
 }
 
 /* ================================================================
+ * Verify/identify decision
+ *
+ * validity_match_decide() is what verify_ssm_done reports. These cover the
+ * decision itself, the read-back of the matched user record, and the
+ * per-attempt reset of the state the decision reads.
+ * ================================================================ */
+
+/* Verify reports a match only for the print whose record the chip matched */
+static void
+test_match_decide_verify (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_RIGHT_INDEX,
+                                                  ID_RIGHT_INDEX);
+  const guint16 right[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  const guint16 left[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX) };
+  ValidityUser user;
+  ValidityMatchResult match;
+
+  make_user_record (&user, 8, ID_RIGHT_INDEX, right, 1);
+  make_match (&match, 8, FP_FINGER_RIGHT_INDEX);
+  g_assert_cmpint (validity_match_decide (FALSE, print, NULL, &match, &user, NULL),
+                   ==, FPI_MATCH_SUCCESS);
+  validity_user_clear (&user);
+
+  /* Another user's same finger */
+  make_user_record (&user, 12, ID_CAROL_RIGHT_INDEX, right, 1);
+  make_match (&match, 12, FP_FINGER_RIGHT_INDEX);
+  g_assert_cmpint (validity_match_decide (FALSE, print, NULL, &match, &user, NULL),
+                   ==, FPI_MATCH_FAIL);
+  validity_user_clear (&user);
+
+  /* The same user's other finger */
+  make_user_record (&user, 10, ID_LEFT_INDEX, left, 1);
+  make_match (&match, 10, FP_FINGER_LEFT_INDEX);
+  g_assert_cmpint (validity_match_decide (FALSE, print, NULL, &match, &user, NULL),
+                   ==, FPI_MATCH_FAIL);
+  validity_user_clear (&user);
+}
+
+/* Identify returns the gallery print the match belongs to, or nothing */
+static void
+test_match_decide_identify (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(GPtrArray) gallery = g_ptr_array_new_with_free_func (g_object_unref);
+  const guint16 right[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  ValidityUser user;
+  ValidityMatchResult match;
+  FpPrint *p_left, *p_right;
+  FpPrint *found;
+
+  p_left = make_enrolled_print (device, FP_FINGER_LEFT_INDEX, ID_LEFT_INDEX);
+  p_right = make_enrolled_print (device, FP_FINGER_RIGHT_INDEX, ID_RIGHT_INDEX);
+  g_ptr_array_add (gallery, p_left);
+  g_ptr_array_add (gallery, p_right);
+
+  make_user_record (&user, 8, ID_RIGHT_INDEX, right, 1);
+  make_match (&match, 8, FP_FINGER_RIGHT_INDEX);
+  found = p_left;
+  g_assert_cmpint (validity_match_decide (TRUE, NULL, gallery, &match, &user, &found),
+                   ==, FPI_MATCH_SUCCESS);
+  g_assert_true (found == p_right);
+  validity_user_clear (&user);
+
+  /* Another user's right index: no gallery print, not gallery[0] */
+  make_user_record (&user, 12, ID_CAROL_RIGHT_INDEX, right, 1);
+  make_match (&match, 12, FP_FINGER_RIGHT_INDEX);
+  found = p_left;
+  g_assert_cmpint (validity_match_decide (TRUE, NULL, gallery, &match, &user, &found),
+                   ==, FPI_MATCH_FAIL);
+  g_assert_null (found);
+
+  /* No match at all also clears the out parameter */
+  found = p_left;
+  g_assert_cmpint (validity_match_decide (TRUE, NULL, gallery, NULL, &user, &found),
+                   ==, FPI_MATCH_FAIL);
+  g_assert_null (found);
+  validity_user_clear (&user);
+}
+
+/* Verify and identify each use their own input: a verify is not decided
+ * against a gallery, nor an identify against a single print. */
+static void
+test_match_decide_mode (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(GPtrArray) gallery = g_ptr_array_new_with_free_func (g_object_unref);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_RIGHT_INDEX,
+                                                  ID_RIGHT_INDEX);
+  const guint16 right[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  ValidityUser user;
+  ValidityMatchResult match;
+  FpPrint *found = NULL;
+
+  g_ptr_array_add (gallery, g_object_ref (print));
+  make_user_record (&user, 8, ID_RIGHT_INDEX, right, 1);
+  make_match (&match, 8, FP_FINGER_RIGHT_INDEX);
+
+  g_assert_cmpint (validity_match_decide (FALSE, NULL, gallery, &match, &user, &found),
+                   ==, FPI_MATCH_FAIL);
+  g_assert_null (found);
+  g_assert_cmpint (validity_match_decide (TRUE, print, NULL, &match, &user, &found),
+                   ==, FPI_MATCH_FAIL);
+  g_assert_null (found);
+
+  validity_user_clear (&user);
+}
+
+/* A match whose user record was not read back, or no match, is no match */
+static void
+test_match_decide_no_readback (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(GPtrArray) gallery = g_ptr_array_new_with_free_func (g_object_unref);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_RIGHT_INDEX,
+                                                  ID_RIGHT_INDEX);
+  const guint16 right[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  ValidityUser empty = { 0 };
+  ValidityUser user;
+  ValidityMatchResult match;
+  FpPrint *found = NULL;
+
+  g_ptr_array_add (gallery, g_object_ref (print));
+  make_match (&match, 8, FP_FINGER_RIGHT_INDEX);
+
+  g_assert_cmpint (validity_match_decide (FALSE, print, NULL, &match, &empty, NULL),
+                   ==, FPI_MATCH_FAIL);
+  g_assert_cmpint (validity_match_decide (TRUE, NULL, gallery, &match, &empty, &found),
+                   ==, FPI_MATCH_FAIL);
+  g_assert_null (found);
+
+  /* A record that would correlate, but no match from the chip */
+  make_user_record (&user, 8, ID_RIGHT_INDEX, right, 1);
+  g_assert_cmpint (validity_match_decide (FALSE, print, NULL, NULL, &user, NULL),
+                   ==, FPI_MATCH_FAIL);
+  match.matched = FALSE;
+  g_assert_cmpint (validity_match_decide (FALSE, print, NULL, &match, &user, NULL),
+                   ==, FPI_MATCH_FAIL);
+  validity_user_clear (&user);
+}
+
+/* The user record to read back comes only from a 0x60 response that
+ * reports a match with a record id get_user can address. */
+static void
+test_match_user_to_read (void)
+{
+  guint8 hash[] = { 0xAA, 0xBB };
+  const guint8 empty_dict[] = { 0x00, 0x00 };
+  gsize len;
+  guint16 dbid = 0xbeef;
+  g_autofree guint8 *ok = build_match_payload (10, 2, hash, sizeof (hash), &len);
+  g_autofree guint8 *wide = NULL;
+  gsize wide_len;
+
+  g_assert_true (validity_match_user_to_read (ok, len, &dbid));
+  g_assert_cmpuint (dbid, ==, 10);
+
+  dbid = 0xbeef;
+  wide = build_match_payload (0x1000a, 2, hash, sizeof (hash), &wide_len);
+  g_assert_false (validity_match_user_to_read (wide, wide_len, &dbid));
+  g_assert_false (validity_match_user_to_read (empty_dict, sizeof (empty_dict),
+                                               &dbid));
+  g_assert_false (validity_match_user_to_read (ok, 1, &dbid));
+  g_assert_false (validity_match_user_to_read (ok, 0, &dbid));
+  g_assert_false (validity_match_user_to_read (NULL, 0, &dbid));
+  g_assert_cmpuint (dbid, ==, 0xbeef);
+}
+
+/* The per-attempt reset leaves nothing from an earlier attempt for the
+ * decision: after it, a match whose get_user failed is no match even
+ * though the previous attempt read back a record that would correlate. */
+static void
+test_verify_clear_match_state (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_RIGHT_INDEX,
+                                                  ID_RIGHT_INDEX);
+  const guint16 right[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  guint8 hash[] = { 0xAA };
+  /* Only the plain fields the reset touches are used; the GObject part of
+   * the instance is never initialised or accessed. */
+  g_autofree FpiDeviceValidity *self = g_new0 (FpiDeviceValidity, 1);
+  ValidityMatchResult match;
+
+  /* State a previous attempt left: its 0x60 response and its record */
+  self->bulk_data = build_match_payload (8, 7, hash, sizeof (hash),
+                                         &self->bulk_data_len);
+  make_user_record (&self->verify_match_user, 8, ID_RIGHT_INDEX, right, 1);
+  make_match (&match, 8, FP_FINGER_RIGHT_INDEX);
+  g_assert_cmpint (validity_match_decide (FALSE, print, NULL, &match,
+                                          &self->verify_match_user, NULL),
+                   ==, FPI_MATCH_SUCCESS);
+
+  validity_verify_clear_match_state (self);
+
+  g_assert_null (self->bulk_data);
+  g_assert_cmpuint (self->bulk_data_len, ==, 0);
+  g_assert_null (self->verify_match_user.identity);
+  g_assert_null (self->verify_match_user.fingers);
+  g_assert_cmpuint (self->verify_match_user.dbid, ==, 0);
+  g_assert_cmpuint (self->verify_match_user.finger_count, ==, 0);
+
+  /* This attempt: the chip names the same record, get_user fails */
+  g_assert_cmpint (validity_match_decide (FALSE, print, NULL, &match,
+                                          &self->verify_match_user, NULL),
+                   ==, FPI_MATCH_FAIL);
+}
+
+/* ================================================================
  * Delete selection
  *
  * Delete must remove the finger from the user record that belongs to the
@@ -6713,6 +6923,18 @@ main (int argc, char *argv[])
                    test_gallery_match_empty);
   g_test_add_func ("/validity/verify/user_get_id",
                    test_user_get_id);
+  g_test_add_func ("/validity/verify/match_decide_verify",
+                   test_match_decide_verify);
+  g_test_add_func ("/validity/verify/match_decide_identify",
+                   test_match_decide_identify);
+  g_test_add_func ("/validity/verify/match_decide_mode",
+                   test_match_decide_mode);
+  g_test_add_func ("/validity/verify/match_decide_no_readback",
+                   test_match_decide_no_readback);
+  g_test_add_func ("/validity/verify/match_user_to_read",
+                   test_match_user_to_read);
+  g_test_add_func ("/validity/verify/clear_match_state",
+                   test_verify_clear_match_state);
   g_test_add_func ("/validity/delete/find_finger_own_record",
                    test_delete_find_finger_own_record);
   g_test_add_func ("/validity/delete/find_finger_multi_finger_record",

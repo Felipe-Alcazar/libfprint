@@ -418,6 +418,102 @@ validity_find_gallery_match (GPtrArray                 *gallery,
   return NULL;
 }
 
+/**
+ * validity_match_decide:
+ * @identify: %TRUE for identify, %FALSE for verify
+ * @print: (nullable): the print being verified (verify)
+ * @gallery: (nullable) (element-type FpPrint): the gallery (identify)
+ * @match: (nullable): this attempt's get_match_result (cmd 0x60), %NULL if
+ *   there was none or it could not be parsed
+ * @user: the user record @match names, as read back this attempt; empty if
+ *   it was not read
+ * @out_gallery_match: (out) (transfer none) (optional): identify: the
+ *   gallery print that matched, or %NULL
+ *
+ * The verify/identify decision verify_ssm_done reports. A chip match is a
+ * match only for the print its user record and finger belong to (see
+ * validity_print_matches_record); no match, or a match whose record was
+ * not read back, is no match.
+ *
+ * Returns: %FPI_MATCH_SUCCESS if @print (verify) or a gallery print
+ *   (identify) matched, %FPI_MATCH_FAIL otherwise
+ */
+FpiMatchResult
+validity_match_decide (gboolean                   identify,
+                       FpPrint                   *print,
+                       GPtrArray                 *gallery,
+                       const ValidityMatchResult *match,
+                       const ValidityUser        *user,
+                       FpPrint                  **out_gallery_match)
+{
+  FpPrint *gallery_match = NULL;
+  gboolean matched = FALSE;
+
+  if (match && match->matched)
+    {
+      if (identify)
+        {
+          gallery_match = validity_find_gallery_match (gallery, match, user);
+          matched = (gallery_match != NULL);
+        }
+      else
+        {
+          matched = validity_print_matches_record (print, match, user);
+        }
+    }
+
+  if (out_gallery_match)
+    *out_gallery_match = gallery_match;
+
+  return matched ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL;
+}
+
+/**
+ * validity_match_user_to_read:
+ * @data: (nullable): the stored get_match_result (cmd 0x60) response
+ * @data_len: length of @data
+ * @out_dbid: (out): the user record to read back
+ *
+ * Returns: %TRUE if @data reports a match, naming a user record that
+ *   get_user (cmd 0x4a) can address, in @out_dbid
+ */
+gboolean
+validity_match_user_to_read (const guint8 *data,
+                             gsize         data_len,
+                             guint16      *out_dbid)
+{
+  MatchResult match = { 0 };
+  gboolean have_match = FALSE;
+
+  if (data && data_len > 0)
+    if (validity_parse_match_result (data, data_len, &match))
+      have_match = match.matched;
+
+  if (have_match && match.user_dbid <= G_MAXUINT16)
+    *out_dbid = (guint16) match.user_dbid;
+  else
+    have_match = FALSE;
+
+  match_result_clear (&match);
+  return have_match;
+}
+
+/**
+ * validity_verify_clear_match_state:
+ * @self: the device
+ *
+ * Drop the stored match result and the matched user record, so that a
+ * verify or identify decides only on its own get_match_result and
+ * get_user responses. Run when an attempt starts and when it ends.
+ */
+void
+validity_verify_clear_match_state (FpiDeviceValidity *self)
+{
+  g_clear_pointer (&self->bulk_data, g_free);
+  self->bulk_data_len = 0;
+  validity_user_clear (&self->verify_match_user);
+}
+
 /* ================================================================
  * Verify/Identify SSM
  * ================================================================ */
@@ -505,28 +601,21 @@ verify_get_match_user (FpiSsm            *ssm,
   /* The chip names the matched user record but not which print it belongs
    * to; read the record back so verify_ssm_done can compare its identity
    * with the print(s) being matched. Nothing to read on a no-match. */
-  MatchResult match = { 0 };
-  gboolean have_match = FALSE;
+  guint16 user_dbid;
 
-  if (self->bulk_data && self->bulk_data_len > 0)
-    if (validity_parse_match_result (self->bulk_data, self->bulk_data_len, &match))
-      have_match = match.matched;
-
-  if (!have_match || match.user_dbid > G_MAXUINT16)
+  if (!validity_match_user_to_read (self->bulk_data, self->bulk_data_len,
+                                    &user_dbid))
     {
-      match_result_clear (&match);
       fpi_ssm_jump_to_state (ssm, VERIFY_DONE);
       return;
     }
 
   {
     gsize cmd_len;
-    guint8 *cmd = validity_db_build_cmd_get_user ((guint16) match.user_dbid,
-                                                  &cmd_len);
+    guint8 *cmd = validity_db_build_cmd_get_user (user_dbid, &cmd_len);
     vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
     g_free (cmd);
   }
-  match_result_clear (&match);
 }
 
 static void
@@ -559,9 +648,7 @@ verify_run_state (FpiSsm   *ssm,
       self->verify_recapture = FALSE;
       /* The match decision must come from this attempt's get_match_result
        * alone; drop anything an earlier action left behind. */
-      g_clear_pointer (&self->bulk_data, g_free);
-      self->bulk_data_len = 0;
-      validity_user_clear (&self->verify_match_user);
+      validity_verify_clear_match_state (self);
       {
         gsize cmd_len;
         const guint8 *cmd = validity_capture_glow_start_cmd (&cmd_len);
@@ -778,9 +865,7 @@ verify_ssm_done (FpiSsm   *ssm,
 
   if (error)
     {
-      g_clear_pointer (&self->bulk_data, g_free);
-      self->bulk_data_len = 0;
-      validity_user_clear (&self->verify_match_user);
+      validity_verify_clear_match_state (self);
 
       /* Recoverable mid-operation reset? Reconnect and retry instead of
        * failing the action (bounded; a true removal falls through). */
@@ -802,26 +887,31 @@ verify_ssm_done (FpiSsm   *ssm,
   /* Parse stored match result */
   MatchResult match = { 0 };
   gboolean have_match = FALSE;
+  FpPrint *print = NULL;
+  GPtrArray *gallery = NULL;
+  FpPrint *gallery_match = NULL;
+  FpiMatchResult result;
 
   if (self->bulk_data && self->bulk_data_len > 0)
     if (validity_parse_match_result (self->bulk_data, self->bulk_data_len, &match))
       have_match = match.matched;
 
+  if (self->identify_mode)
+    fpi_device_get_identify_data (dev, &gallery);
+  else
+    fpi_device_get_verify_data (dev, &print);
+
   /* The chip matched against every template it holds, so a match is only a
    * match for the print(s) being checked if the matched user record belongs
-   * to one of them (see validity_print_matches_record). */
+   * to one of them (see validity_match_decide). */
+  result = validity_match_decide (self->identify_mode, print, gallery,
+                                  have_match ? &match : NULL,
+                                  &self->verify_match_user, &gallery_match);
+
   if (self->identify_mode)
     {
-      FpPrint *gallery_match = NULL;
-
       if (have_match)
         {
-          GPtrArray *gallery = NULL;
-
-          fpi_device_get_identify_data (dev, &gallery);
-          gallery_match = validity_find_gallery_match (gallery, &match,
-                                                       &self->verify_match_user);
-
           if (gallery_match)
             fp_info ("Identify matched: user_dbid=%u subtype=%u",
                      match.user_dbid, match.subtype);
@@ -837,36 +927,22 @@ verify_ssm_done (FpiSsm   *ssm,
   else
     {
       /* Verify mode */
-      FpPrint *print = NULL;
-
-      fpi_device_get_verify_data (dev, &print);
-
-      if (have_match &&
-          validity_print_matches_record (print, &match,
-                                         &self->verify_match_user))
-        {
-          fp_info ("Verify matched: user_dbid=%u subtype=%u",
-                   match.user_dbid, match.subtype);
-          fpi_device_verify_report (dev, FPI_MATCH_SUCCESS, NULL, NULL);
-        }
+      if (result == FPI_MATCH_SUCCESS)
+        fp_info ("Verify matched: user_dbid=%u subtype=%u",
+                 match.user_dbid, match.subtype);
+      else if (have_match)
+        fp_info ("Verify: chip matched user_dbid=%u subtype=%u, "
+                 "which is not the print being verified -- no match",
+                 match.user_dbid, match.subtype);
       else
-        {
-          if (have_match)
-            fp_info ("Verify: chip matched user_dbid=%u subtype=%u, "
-                     "which is not the print being verified -- no match",
-                     match.user_dbid, match.subtype);
-          else
-            fp_info ("Verify: no match");
-          fpi_device_verify_report (dev, FPI_MATCH_FAIL, NULL, NULL);
-        }
+        fp_info ("Verify: no match");
 
+      fpi_device_verify_report (dev, result, NULL, NULL);
       fpi_device_verify_complete (dev, NULL);
     }
 
   match_result_clear (&match);
-  validity_user_clear (&self->verify_match_user);
-  g_clear_pointer (&self->bulk_data, g_free);
-  self->bulk_data_len = 0;
+  validity_verify_clear_match_state (self);
 }
 
 /* ================================================================

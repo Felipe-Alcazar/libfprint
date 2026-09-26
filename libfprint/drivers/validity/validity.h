@@ -454,6 +454,16 @@ gboolean validity_print_matches_record (FpPrint                   *print,
 FpPrint *validity_find_gallery_match (GPtrArray                 *gallery,
                                       const ValidityMatchResult *match,
                                       const ValidityUser        *user);
+FpiMatchResult validity_match_decide (gboolean                   identify,
+                                      FpPrint                   *print,
+                                      GPtrArray                 *gallery,
+                                      const ValidityMatchResult *match,
+                                      const ValidityUser        *user,
+                                      FpPrint                  **out_gallery_match);
+gboolean validity_match_user_to_read (const guint8 *data,
+                                      gsize         data_len,
+                                      guint16      *out_dbid);
+void validity_verify_clear_match_state (FpiDeviceValidity *self);
 
 /* Delete selection helpers (validity_verify.c) -- exposed for unit testing */
 gboolean validity_delete_find_finger (FpPrint            *print,
