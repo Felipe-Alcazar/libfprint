@@ -224,7 +224,9 @@ err_close:
  *   8) Upload firmware extension via TLS (if not loaded)
  *
  * Open fails if no TLS session was established, except in emulation:
- * without one the device cannot enroll, verify, list or delete.
+ * without one the device cannot enroll, verify, list or delete. It also
+ * fails if sensor calibration fails; emulation never gets that far, as it
+ * skips TLS and jumps to OPEN_DONE.
  */
 
 typedef enum {
@@ -1156,8 +1158,11 @@ open_calibrate_send (FpiSsm            *ssm,
                                        &cmd_len);
   if (!cmd)
     {
-      fp_warn ("Failed to build calibration capture command");
-      fpi_ssm_jump_to_state (ssm, OPEN_DONE);
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                     "Sensor calibration failed: "
+                                                     "could not build the "
+                                                     "calibration capture command"));
       return;
     }
 
@@ -1174,12 +1179,21 @@ open_calibrate_send_recv (FpiSsm            *ssm,
 {
   FpDevice *dev = FP_DEVICE (self);
 
-
+  /* PY: calibrate() asserts the status, so a failed calibration capture
+   * fails the open. Carrying on would leave the sensor with partial or no
+   * calibration, and without it chunk 0x26 (Finger Detect) always triggers. */
   if (self->cmd_response_status != VCSFW_STATUS_OK)
     {
       fp_warn ("Calibration capture failed: status=0x%04x",
                self->cmd_response_status);
-      fpi_ssm_jump_to_state (ssm, OPEN_DONE);
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                     "Sensor calibration failed: "
+                                                     "calibration capture %u/%u "
+                                                     "returned status 0x%04x",
+                                                     self->calib_iteration + 1,
+                                                     self->capture.calibration_iterations,
+                                                     self->cmd_response_status));
       return;
     }
 
@@ -1237,8 +1251,8 @@ open_calibrate_read_data (FpiSsm            *ssm,
         }
       else
         {
-          fp_dbg ("Calibration iteration %u: averaging failed",
-                  self->calib_iteration + 1);
+          fp_warn ("Calibration iteration %u: averaging failed",
+                   self->calib_iteration + 1);
           g_free (averaged);
         }
 
@@ -1247,8 +1261,8 @@ open_calibrate_read_data (FpiSsm            *ssm,
     }
   else
     {
-      fp_dbg ("Calibration iteration %u: no bulk data",
-              self->calib_iteration + 1);
+      fp_warn ("Calibration iteration %u: no bulk data",
+               self->calib_iteration + 1);
     }
 
   fpi_ssm_next_state (ssm);
@@ -1262,6 +1276,15 @@ open_calibrate_loop (FpiSsm            *ssm,
   if (self->calib_iteration < self->capture.calibration_iterations)
     {
       fpi_ssm_jump_to_state (ssm, OPEN_CALIBRATE_SEND);
+    }
+  else if (!self->capture.calib_data || self->capture.calib_data_len == 0)
+    {
+      /* No iteration produced usable data (each one warned above) */
+      fpi_ssm_mark_failed (ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                                     "Sensor calibration failed: "
+                                                     "no calibration data was "
+                                                     "captured"));
     }
   else
     {
