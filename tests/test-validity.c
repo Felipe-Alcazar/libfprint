@@ -2873,6 +2873,220 @@ test_user_get_id (void)
 }
 
 /* ================================================================
+ * Delete selection
+ *
+ * Delete must remove the finger from the user record that belongs to the
+ * print (identity = the print's id string), never the first record that
+ * happens to hold the same finger, and remove that record only once it is
+ * empty.
+ * ================================================================ */
+
+/* The delete SSM scans the records in storage order and takes the first one
+ * that validity_delete_find_finger() selects. */
+static const ValidityUser *
+delete_scan (FpPrint            *print,
+             const ValidityUser *users,
+             guint               n_users,
+             guint16            *finger_dbid,
+             gboolean           *leaves_empty)
+{
+  for (guint i = 0; i < n_users; i++)
+    if (validity_delete_find_finger (print, &users[i], finger_dbid, leaves_empty))
+      return &users[i];
+
+  return NULL;
+}
+
+/* The print's own record is chosen, not another user's record that holds
+ * the same finger and comes first in storage order. */
+static void
+test_delete_find_finger_own_record (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_RIGHT_INDEX,
+                                                  ID_RIGHT_INDEX);
+  const guint16 right[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  const guint16 left[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX) };
+  ValidityUser users[3];
+  const ValidityUser *chosen;
+  guint16 finger_dbid = 0xffff;
+  gboolean leaves_empty = FALSE;
+
+  make_user_record (&users[0], 4, ID_CAROL_RIGHT_INDEX, right, 1);
+  make_user_record (&users[1], 6, ID_LEFT_INDEX, left, 1);
+  make_user_record (&users[2], 8, ID_RIGHT_INDEX, right, 1);
+
+  chosen = delete_scan (print, users, G_N_ELEMENTS (users),
+                        &finger_dbid, &leaves_empty);
+  g_assert_true (chosen == &users[2]);
+  g_assert_cmpuint (finger_dbid, ==, 9);
+  g_assert_true (leaves_empty);
+
+  for (guint i = 0; i < G_N_ELEMENTS (users); i++)
+    validity_user_clear (&users[i]);
+}
+
+/* A record holding several fingers under the print's identity (as
+ * python-validity lays them out): the right finger, and the record is not
+ * left empty. */
+static void
+test_delete_find_finger_multi_finger_record (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_RIGHT_INDEX,
+                                                  ID_RIGHT_INDEX);
+  const guint16 both[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX),
+                           validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  ValidityUser user;
+  guint16 finger_dbid = 0xffff;
+  gboolean leaves_empty = TRUE;
+
+  make_user_record (&user, 20, ID_RIGHT_INDEX, both, 2);
+
+  g_assert_true (validity_delete_find_finger (print, &user, &finger_dbid,
+                                              &leaves_empty));
+  g_assert_cmpuint (finger_dbid, ==, 22);
+  g_assert_false (leaves_empty);
+
+  validity_user_clear (&user);
+}
+
+/* The same finger in another user's record is never chosen, even when it is
+ * the only record that holds that finger. */
+static void
+test_delete_find_finger_other_user (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_RIGHT_INDEX,
+                                                  ID_RIGHT_INDEX);
+  const guint16 right[] = { validity_finger_to_subtype (FP_FINGER_RIGHT_INDEX) };
+  const guint16 left[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX) };
+  ValidityUser users[2];
+  guint16 finger_dbid = 0xffff;
+  gboolean leaves_empty = FALSE;
+
+  make_user_record (&users[0], 12, ID_CAROL_RIGHT_INDEX, right, 1);
+  make_user_record (&users[1], 10, ID_LEFT_INDEX, left, 1);
+
+  g_assert_null (delete_scan (print, users, G_N_ELEMENTS (users),
+                              &finger_dbid, &leaves_empty));
+  g_assert_cmpuint (finger_dbid, ==, 0xffff);
+  g_assert_false (leaves_empty);
+
+  for (guint i = 0; i < G_N_ELEMENTS (users); i++)
+    validity_user_clear (&users[i]);
+}
+
+/* Anything that cannot be correlated selects nothing */
+static void
+test_delete_find_finger_no_correlation (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_LEFT_INDEX,
+                                                  ID_LEFT_INDEX);
+  g_autoptr(FpPrint) no_id = make_enrolled_print (device, FP_FINGER_LEFT_INDEX,
+                                                  NULL);
+  g_autoptr(FpPrint) empty_id = make_enrolled_print (device, FP_FINGER_LEFT_INDEX,
+                                                     "");
+  g_autoptr(FpPrint) no_finger = make_enrolled_print (device, FP_FINGER_UNKNOWN,
+                                                      ID_LEFT_INDEX);
+  const guint16 subtypes[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX) };
+  const guint16 other[] = { validity_finger_to_subtype (FP_FINGER_LEFT_THUMB) };
+  const guint16 zero[] = { 0 };
+  /* A python-validity record: identity type 3 with a binary Windows SID */
+  const guint8 sid_identity[] = { 3, 0, 0, 0, 12, 0, 0, 0,
+                                  0x01, 0x01, 0, 0, 0, 0, 0, 0x05,
+                                  0x12, 0, 0, 0 };
+  ValidityUser user;
+  guint16 finger_dbid = 0xffff;
+  gboolean leaves_empty = FALSE;
+
+  make_user_record (&user, 10, ID_LEFT_INDEX, subtypes, 1);
+  g_assert_false (validity_delete_find_finger (no_id, &user, &finger_dbid,
+                                               &leaves_empty));
+  g_assert_false (validity_delete_find_finger (empty_id, &user, &finger_dbid,
+                                               &leaves_empty));
+  g_assert_false (validity_delete_find_finger (NULL, &user, &finger_dbid,
+                                               &leaves_empty));
+  g_assert_false (validity_delete_find_finger (print, NULL, &finger_dbid,
+                                               &leaves_empty));
+  validity_user_clear (&user);
+
+  /* Identity that is only a prefix, or longer */
+  make_user_record (&user, 10, "FP1-20260926-2-1A2B3C4D", subtypes, 1);
+  g_assert_false (validity_delete_find_finger (print, &user, &finger_dbid,
+                                               &leaves_empty));
+  validity_user_clear (&user);
+  make_user_record (&user, 10, ID_LEFT_INDEX "x", subtypes, 1);
+  g_assert_false (validity_delete_find_finger (print, &user, &finger_dbid,
+                                               &leaves_empty));
+  validity_user_clear (&user);
+
+  /* Record without an identity, or with a python-validity SID */
+  make_user_record (&user, 10, NULL, subtypes, 1);
+  g_assert_false (validity_delete_find_finger (print, &user, &finger_dbid,
+                                               &leaves_empty));
+  user.identity = g_memdup2 (sid_identity, sizeof (sid_identity));
+  user.identity_len = sizeof (sid_identity);
+  g_assert_false (validity_delete_find_finger (print, &user, &finger_dbid,
+                                               &leaves_empty));
+  validity_user_clear (&user);
+
+  /* The print's record, but without the print's finger */
+  make_user_record (&user, 10, ID_LEFT_INDEX, other, 1);
+  g_assert_false (validity_delete_find_finger (print, &user, &finger_dbid,
+                                               &leaves_empty));
+  validity_user_clear (&user);
+
+  /* The print's record with no fingers at all */
+  make_user_record (&user, 10, ID_LEFT_INDEX, NULL, 0);
+  g_assert_false (validity_delete_find_finger (print, &user, &finger_dbid,
+                                               &leaves_empty));
+  validity_user_clear (&user);
+
+  /* A print with no finger set does not match a subtype-0 entry */
+  make_user_record (&user, 10, ID_LEFT_INDEX, zero, 1);
+  g_assert_false (validity_delete_find_finger (no_finger, &user, &finger_dbid,
+                                               &leaves_empty));
+  validity_user_clear (&user);
+
+  g_assert_cmpuint (finger_dbid, ==, 0xffff);
+  g_assert_false (leaves_empty);
+}
+
+/* After the finger is deleted, its record is removed only if the fresh read
+ * shows the same record, the print's identity and no fingers. */
+static void
+test_delete_owner_is_empty (void)
+{
+  g_autoptr(FpDevice) device = g_object_new (FPI_TYPE_DEVICE_FAKE, NULL);
+  g_autoptr(FpPrint) print = make_enrolled_print (device, FP_FINGER_LEFT_INDEX,
+                                                  ID_LEFT_INDEX);
+  const guint16 subtypes[] = { validity_finger_to_subtype (FP_FINGER_LEFT_INDEX) };
+  ValidityUser user;
+
+  make_user_record (&user, 10, ID_LEFT_INDEX, NULL, 0);
+  g_assert_true (validity_delete_owner_is_empty (print, 10, &user));
+  g_assert_false (validity_delete_owner_is_empty (print, 11, &user));
+  g_assert_false (validity_delete_owner_is_empty (NULL, 10, &user));
+  g_assert_false (validity_delete_owner_is_empty (print, 10, NULL));
+  validity_user_clear (&user);
+
+  /* Still holds a finger (the delete did not take, or another finger) */
+  make_user_record (&user, 10, ID_LEFT_INDEX, subtypes, 1);
+  g_assert_false (validity_delete_owner_is_empty (print, 10, &user));
+  validity_user_clear (&user);
+
+  /* Another identity, or none */
+  make_user_record (&user, 10, ID_CAROL_RIGHT_INDEX, NULL, 0);
+  g_assert_false (validity_delete_owner_is_empty (print, 10, &user));
+  validity_user_clear (&user);
+  make_user_record (&user, 10, NULL, NULL, 0);
+  g_assert_false (validity_delete_owner_is_empty (print, 10, &user));
+  validity_user_clear (&user);
+}
+
+/* ================================================================
  * R4: enroll_user_dbid and delete_storage_dbid are separate fields
  *
  * Both fields must exist independently in the device struct.
@@ -2973,8 +3187,12 @@ test_delete_states_exist (void)
   g_assert_cmpint (DELETE_LOOKUP_USER_RECV, ==, 3);
   g_assert_cmpint (DELETE_DEL_RECORD, ==, 4);
   g_assert_cmpint (DELETE_DEL_RECORD_RECV, ==, 5);
-  g_assert_cmpint (DELETE_DONE, ==, 6);
-  g_assert_cmpint (DELETE_NUM_STATES, ==, 7);
+  g_assert_cmpint (DELETE_GET_OWNER, ==, 6);
+  g_assert_cmpint (DELETE_GET_OWNER_RECV, ==, 7);
+  g_assert_cmpint (DELETE_DEL_OWNER, ==, 8);
+  g_assert_cmpint (DELETE_DEL_OWNER_RECV, ==, 9);
+  g_assert_cmpint (DELETE_DONE, ==, 10);
+  g_assert_cmpint (DELETE_NUM_STATES, ==, 11);
 }
 
 /* ================================================================
@@ -6495,6 +6713,16 @@ main (int argc, char *argv[])
                    test_gallery_match_empty);
   g_test_add_func ("/validity/verify/user_get_id",
                    test_user_get_id);
+  g_test_add_func ("/validity/delete/find_finger_own_record",
+                   test_delete_find_finger_own_record);
+  g_test_add_func ("/validity/delete/find_finger_multi_finger_record",
+                   test_delete_find_finger_multi_finger_record);
+  g_test_add_func ("/validity/delete/find_finger_other_user",
+                   test_delete_find_finger_other_user);
+  g_test_add_func ("/validity/delete/find_finger_no_correlation",
+                   test_delete_find_finger_no_correlation);
+  g_test_add_func ("/validity/delete/owner_is_empty",
+                   test_delete_owner_is_empty);
 
   /* R4: struct field separation */
   g_test_add_func ("/validity/verify/struct_separate_fields",

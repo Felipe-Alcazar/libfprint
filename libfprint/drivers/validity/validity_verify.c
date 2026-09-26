@@ -309,6 +309,34 @@ validity_parse_match_result (const guint8        *data,
   return TRUE;
 }
 
+/* TRUE if @user's identity is @print's fpi-data id string, compared by length
+ * and bytes. Every enrollment creates its own user record under the id string
+ * that enroll also stores as the print's fpi-data, so this is what ties a
+ * print to its chip record. A print with no or an empty id string, or a
+ * record without a readable identity, belongs to nothing. */
+static gboolean
+print_owns_record (FpPrint            *print,
+                   const ValidityUser *user)
+{
+  g_autoptr(GVariant) data = NULL;
+  const gchar *print_id;
+  gsize print_id_len;
+  const guint8 *record_id;
+  gsize record_id_len;
+
+  g_object_get (print, "fpi-data", &data, NULL);
+  if (!data || !g_variant_is_of_type (data, G_VARIANT_TYPE_STRING))
+    return FALSE;
+
+  print_id = g_variant_get_string (data, &print_id_len);
+  if (print_id_len == 0)
+    return FALSE;
+
+  return validity_db_user_get_id (user, &record_id, &record_id_len) &&
+         record_id_len == print_id_len &&
+         memcmp (record_id, print_id, print_id_len) == 0;
+}
+
 /**
  * validity_print_matches_record:
  * @print: an enrolled print (from enroll, list, or deserialised)
@@ -337,11 +365,6 @@ validity_print_matches_record (FpPrint                   *print,
                                const ValidityMatchResult *match,
                                const ValidityUser        *user)
 {
-  g_autoptr(GVariant) data = NULL;
-  const gchar *print_id;
-  gsize print_id_len;
-  const guint8 *record_id;
-  gsize record_id_len;
   gboolean has_finger = FALSE;
 
   if (!print || !match || !match->matched || !user)
@@ -350,17 +373,7 @@ validity_print_matches_record (FpPrint                   *print,
   if (user->dbid != match->user_dbid)
     return FALSE;
 
-  g_object_get (print, "fpi-data", &data, NULL);
-  if (!data || !g_variant_is_of_type (data, G_VARIANT_TYPE_STRING))
-    return FALSE;
-
-  print_id = g_variant_get_string (data, &print_id_len);
-  if (print_id_len == 0)
-    return FALSE;
-
-  if (!validity_db_user_get_id (user, &record_id, &record_id_len) ||
-      record_id_len != print_id_len ||
-      memcmp (record_id, print_id, print_id_len) != 0)
+  if (!print_owns_record (print, user))
     return FALSE;
 
   if (validity_finger_to_subtype (fp_print_get_finger (print)) != match->subtype)
@@ -1207,6 +1220,80 @@ validity_list (FpDevice *device)
  * Delete print — remove a fingerprint record from the sensor DB
  * ================================================================ */
 
+/**
+ * validity_delete_find_finger:
+ * @print: the print to delete
+ * @user: a user record read back with cmd 0x4a
+ * @out_finger_dbid: (out): the finger record to delete
+ * @out_leaves_empty: (out): %TRUE if that is the only finger in @user
+ *
+ * Decide whether @user is the chip record that holds @print: its identity
+ * must be @print's id string (see print_owns_record) and it must hold a
+ * finger of @print's subtype. Another record with the same finger, which
+ * may belong to another OS user or to a python-validity enrollment, is not
+ * @print's and is never selected.
+ *
+ * python-validity scopes deletes the same way: DeleteEnrolledFingers looks
+ * up the record for the caller's identity (db.lookup_user) and deletes only
+ * that record.
+ *
+ * Returns: %TRUE if @user holds @print; the out parameters are set only then
+ */
+gboolean
+validity_delete_find_finger (FpPrint            *print,
+                             const ValidityUser *user,
+                             guint16            *out_finger_dbid,
+                             gboolean           *out_leaves_empty)
+{
+  guint16 subtype;
+
+  if (!print || !user || !print_owns_record (print, user))
+    return FALSE;
+
+  subtype = validity_finger_to_subtype (fp_print_get_finger (print));
+  if (subtype == 0)
+    return FALSE;
+
+  for (guint16 i = 0; i < user->finger_count; i++)
+    {
+      if (user->fingers[i].subtype == subtype)
+        {
+          *out_finger_dbid = user->fingers[i].dbid;
+          *out_leaves_empty = (user->finger_count == 1);
+          return TRUE;
+        }
+    }
+
+  return FALSE;
+}
+
+/**
+ * validity_delete_owner_is_empty:
+ * @print: the print just deleted
+ * @owner_dbid: the user record validity_delete_find_finger() selected
+ * @user: that record, read back after the finger was deleted
+ *
+ * After the finger is gone, its user record is deleted too if it is now
+ * empty. Deleting a user record also deletes every finger under it (it is
+ * how python-validity's DeleteEnrolledFingers removes all of a user's
+ * prints), so re-check on the fresh read that it is the same record, still
+ * @print's identity, and holds no finger at all.
+ *
+ * Returns: %TRUE if @user may be deleted
+ */
+gboolean
+validity_delete_owner_is_empty (FpPrint            *print,
+                                guint16             owner_dbid,
+                                const ValidityUser *user)
+{
+  if (!print || !user)
+    return FALSE;
+
+  return user->dbid == owner_dbid &&
+         user->finger_count == 0 &&
+         print_owns_record (print, user);
+}
+
 
 static void
 delete_get_storage (FpiSsm            *ssm,
@@ -1264,18 +1351,33 @@ static void
 delete_lookup_user (FpiSsm            *ssm,
                     FpiDeviceValidity *self)
 {
-  /* Scan every user: locate the finger to delete and tally the total number of
-   * fingers on the chip, so we can tell whether this delete empties it.
-   * python-validity: db.lookup_user(identity) */
+  /* Scan every user: locate the record and finger that hold the print (by
+   * identity, as python-validity's db.lookup_user(identity) does, then by
+   * finger) and tally the total number of fingers on the chip, so we can
+   * tell whether this delete empties it. */
   if (self->list_user_idx >= self->list_storage.user_count)
     {
       if (!self->delete_found)
         {
-          /* No matching finger found across all users */
-          fp_info ("Delete: no matching finger (subtype=%u) found in DB",
-                   self->delete_finger_subtype);
-          fpi_ssm_mark_failed (ssm,
-                               fpi_device_error_new (FP_DEVICE_ERROR_DATA_NOT_FOUND));
+          /* No user record holds this print. Report that rather than
+           * succeed: fprintd still removes its own copy of the print,
+           * and an error keeps its storage-full clean-up (delete a device
+           * print it does not know, then retry the enroll) from looping
+           * on a print nothing was deleted for. If a record could not be
+           * read, the print may be in it: a read failure, not not-found. */
+          if (self->delete_scan_ok)
+            {
+              fp_info ("Delete: no user record holds this print (subtype=%u)",
+                       self->delete_finger_subtype);
+              fpi_ssm_mark_failed (ssm,
+                                   fpi_device_error_new (FP_DEVICE_ERROR_DATA_NOT_FOUND));
+            }
+          else
+            {
+              fp_warn ("Delete: print not found, and a user record could not be read");
+              fpi_ssm_mark_failed (ssm,
+                                   fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+            }
           return;
         }
 
@@ -1318,15 +1420,15 @@ delete_lookup_user_recv (FpiSsm            *ssm,
 
           if (!self->delete_found)
             {
-              for (guint16 i = 0; i < user.finger_count; i++)
+              FpPrint *print = NULL;
+
+              fpi_device_get_delete_data (FP_DEVICE (self), &print);
+              if (validity_delete_find_finger (print, &user,
+                                               &self->delete_finger_dbid,
+                                               &self->delete_owner_empties))
                 {
-                  if (user.fingers[i].subtype == self->delete_finger_subtype)
-                    {
-                      /* Found matching finger — store dbid for deletion */
-                      self->delete_finger_dbid = user.fingers[i].dbid;
-                      self->delete_found = TRUE;
-                      break;
-                    }
+                  self->delete_owner_dbid = user.dbid;
+                  self->delete_found = TRUE;
                 }
             }
           validity_user_clear (&user);
@@ -1374,6 +1476,90 @@ delete_del_record_recv (FpiSsm            *ssm,
     }
 
   fp_info ("Deleted finger record: dbid=%u", self->delete_finger_dbid);
+  self->delete_finger_deleted = TRUE;
+
+  /* del_record of a finger leaves its user record behind. Remove that too
+   * if the print was its only finger -- except when this delete empties the
+   * chip, where the partition erase in delete_ssm_done removes it anyway and
+   * the path to that erase stays as it was. */
+  if (self->delete_owner_empties && !self->delete_reclaim)
+    fpi_ssm_next_state (ssm);
+  else
+    fpi_ssm_jump_to_state (ssm, DELETE_DONE);
+}
+
+static void
+delete_get_owner (FpiSsm            *ssm,
+                  FpiDeviceValidity *self)
+{
+  gsize cmd_len;
+  guint8 *cmd = validity_db_build_cmd_get_user (self->delete_owner_dbid,
+                                                &cmd_len);
+
+  vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
+  g_free (cmd);
+}
+
+static void
+delete_get_owner_recv (FpiSsm            *ssm,
+                       FpiDeviceValidity *self)
+{
+  ValidityUser user = { 0 };
+  FpPrint *print = NULL;
+  gboolean empty = FALSE;
+
+  fpi_device_get_delete_data (FP_DEVICE (self), &print);
+
+  if (self->cmd_response_status == VCSFW_STATUS_OK &&
+      self->cmd_response_data &&
+      validity_db_parse_user (self->cmd_response_data,
+                              self->cmd_response_len,
+                              &user))
+    {
+      empty = validity_delete_owner_is_empty (print, self->delete_owner_dbid,
+                                              &user);
+      if (!empty)
+        fp_warn ("Delete: user record %u still holds %u finger(s) -- keeping it",
+                 self->delete_owner_dbid, user.finger_count);
+      validity_user_clear (&user);
+    }
+  else
+    {
+      fp_warn ("Delete: could not re-read user record %u (status=0x%04x) -- keeping it",
+               self->delete_owner_dbid, self->cmd_response_status);
+    }
+
+  if (empty)
+    fpi_ssm_next_state (ssm);
+  else
+    fpi_ssm_jump_to_state (ssm, DELETE_DONE);
+}
+
+static void
+delete_del_owner (FpiSsm            *ssm,
+                  FpiDeviceValidity *self)
+{
+  /* Same command python-validity's DeleteEnrolledFingers sends for a user
+   * record: db.del_record(usr.dbid) */
+  gsize cmd_len;
+  guint8 *cmd = validity_db_build_cmd_del_record (self->delete_owner_dbid,
+                                                  &cmd_len);
+
+  vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
+  g_free (cmd);
+}
+
+static void
+delete_del_owner_recv (FpiSsm            *ssm,
+                       FpiDeviceValidity *self)
+{
+  /* Best effort: the print itself is already deleted */
+  if (self->cmd_response_status != VCSFW_STATUS_OK)
+    fp_warn ("Delete: del_record of empty user record %u failed: status=0x%04x",
+             self->delete_owner_dbid, self->cmd_response_status);
+  else
+    fp_info ("Deleted empty user record: dbid=%u", self->delete_owner_dbid);
+
   fpi_ssm_next_state (ssm);
 }
 
@@ -1407,6 +1593,22 @@ delete_run_state (FpiSsm   *ssm,
 
     case DELETE_DEL_RECORD_RECV:
       delete_del_record_recv (ssm, self);
+      break;
+
+    case DELETE_GET_OWNER:
+      delete_get_owner (ssm, self);
+      break;
+
+    case DELETE_GET_OWNER_RECV:
+      delete_get_owner_recv (ssm, self);
+      break;
+
+    case DELETE_DEL_OWNER:
+      delete_del_owner (ssm, self);
+      break;
+
+    case DELETE_DEL_OWNER_RECV:
+      delete_del_owner_recv (ssm, self);
       break;
 
     case DELETE_DONE:
@@ -1463,6 +1665,16 @@ delete_ssm_done (FpiSsm   *ssm,
     }
 
   self->delete_reclaim = FALSE;
+
+  /* An error after the finger record was deleted can only come from the
+   * empty-user clean-up: the print itself is gone, so report the delete. */
+  if (error && self->delete_finger_deleted)
+    {
+      fp_warn ("Delete: print deleted, but removing its empty user record failed: %s",
+               error->message);
+      g_clear_error (&error);
+    }
+
   fpi_device_delete_complete (dev, validity_map_removed_error (error));
 }
 
@@ -1484,6 +1696,9 @@ validity_delete (FpDevice *device)
   self->delete_total_fingers = 0;
   self->delete_found = FALSE;
   self->delete_scan_ok = TRUE;
+  self->delete_owner_dbid = 0;
+  self->delete_owner_empties = FALSE;
+  self->delete_finger_deleted = FALSE;
   ssm = fpi_ssm_new (device, delete_run_state, DELETE_NUM_STATES);
   fpi_ssm_start (ssm, delete_ssm_done);
 }

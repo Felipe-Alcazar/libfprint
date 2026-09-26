@@ -233,6 +233,10 @@ typedef enum {
   DELETE_LOOKUP_USER_RECV,
   DELETE_DEL_RECORD,
   DELETE_DEL_RECORD_RECV,
+  DELETE_GET_OWNER,            /* re-read the deleted finger's user record */
+  DELETE_GET_OWNER_RECV,
+  DELETE_DEL_OWNER,            /* delete that record if it is now empty */
+  DELETE_DEL_OWNER_RECV,
   DELETE_DONE,
   DELETE_NUM_STATES,
 } ValidityDeleteState;
@@ -329,6 +333,9 @@ struct _FpiDeviceValidity
   guint16  delete_storage_dbid;
   guint16  delete_finger_subtype;
   guint16  delete_finger_dbid;
+  guint16  delete_owner_dbid;      /* the user record that holds the print */
+  gboolean delete_owner_empties;   /* deleting the finger leaves that record empty */
+  gboolean delete_finger_deleted;  /* del_record of the finger succeeded */
   guint16  delete_total_fingers;   /* fingers tallied while scanning all users */
   gboolean delete_found;           /* the print to delete was located */
   gboolean delete_scan_ok;         /* every get_user during the scan succeeded */
@@ -447,3 +454,12 @@ gboolean validity_print_matches_record (FpPrint                   *print,
 FpPrint *validity_find_gallery_match (GPtrArray                 *gallery,
                                       const ValidityMatchResult *match,
                                       const ValidityUser        *user);
+
+/* Delete selection helpers (validity_verify.c) -- exposed for unit testing */
+gboolean validity_delete_find_finger (FpPrint            *print,
+                                      const ValidityUser *user,
+                                      guint16            *out_finger_dbid,
+                                      gboolean           *out_leaves_empty);
+gboolean validity_delete_owner_is_empty (FpPrint            *print,
+                                         guint16             owner_dbid,
+                                         const ValidityUser *user);
