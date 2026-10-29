@@ -266,6 +266,8 @@ typedef enum {
   OPEN_SENSOR_FACTORY_BITS_RECV,
   OPEN_CAPTURE_SETUP,
   OPEN_CALIBRATE_BUILD,
+  OPEN_CALIBRATE_STOP_SCAN,
+  OPEN_CALIBRATE_STOP_SCAN_RECV,
   OPEN_CALIBRATE_SEND,
   OPEN_CALIBRATE_SEND_RECV,
   OPEN_CALIBRATE_READ_DATA,
@@ -1427,6 +1429,25 @@ open_run_state (FpiSsm   *ssm,
       open_calibrate_build (ssm, self);
       break;
 
+    case OPEN_CALIBRATE_STOP_SCAN:
+      /* A scan cut short in an earlier session (a cancelled verify) is still
+       * armed on a match-on-host sensor and makes every capture command,
+       * calibration included, fail with 0x0450 until it is stopped. */
+      if (validity_moh_is_moh (self))
+        {
+          const guint8 cmd[] = { 0x04 };
+          vcsfw_tls_cmd_send (self, ssm, cmd, sizeof (cmd), NULL);
+        }
+      else
+        {
+          fpi_ssm_jump_to_state (ssm, OPEN_CALIBRATE_SEND);
+        }
+      break;
+
+    case OPEN_CALIBRATE_STOP_SCAN_RECV:
+      fpi_ssm_next_state (ssm);
+      break;
+
     case OPEN_CALIBRATE_SEND:
       open_calibrate_send (ssm, self);
       break;
@@ -1462,6 +1483,9 @@ open_ssm_done (FpiSsm   *ssm,
     {
       validity_release_state (self);
       g_usb_device_release_interface (fpi_device_get_usb_device (dev), 0, 0, NULL);
+      /* The core opened the USB device and leaves it open on a failed open,
+       * so every later open would fail with "already open". */
+      g_usb_device_close (fpi_device_get_usb_device (dev), NULL);
       fpi_device_open_complete (dev, validity_map_removed_error (error));
       return;
     }
@@ -1636,6 +1660,7 @@ dev_open (FpDevice *device)
   if (!g_usb_device_claim_interface (fpi_device_get_usb_device (device), 0, 0, &error))
     {
       validity_release_state (self);
+      g_usb_device_close (fpi_device_get_usb_device (device), NULL);
       fpi_device_open_complete (device, validity_map_removed_error (error));
       return;
     }
