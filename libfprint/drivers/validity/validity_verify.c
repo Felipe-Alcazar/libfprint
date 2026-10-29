@@ -545,6 +545,18 @@ static void
 verify_capture_recv (FpiSsm            *ssm,
                      FpiDeviceValidity *self)
 {
+  if (self->cmd_response_status != VCSFW_STATUS_OK &&
+      validity_moh_is_moh (self) && self->moh_capture_resets < 2)
+    {
+      /* A capture cut short by a cancel leaves the scan program running and
+       * the next one is refused (0x0450): stop it and arm again. */
+      fp_dbg ("Capture refused (status=0x%04x): stopping the previous scan",
+              self->cmd_response_status);
+      self->moh_capture_resets++;
+      self->verify_recapture = TRUE;
+      fpi_ssm_jump_to_state (ssm, VERIFY_CAPTURE_STOP);
+      return;
+    }
   if (self->cmd_response_status != VCSFW_STATUS_OK)
     {
       fp_warn ("Capture (identify) failed: status=0x%04x",
@@ -667,6 +679,7 @@ verify_run_state (FpiSsm   *ssm,
     case VERIFY_LED_ON:
       self->verify_capture_retries = 0;
       self->verify_recapture = FALSE;
+      self->moh_capture_resets = 0;
       /* The match decision must come from this attempt's get_match_result
        * alone; drop anything an earlier action left behind. */
       validity_verify_clear_match_state (self);

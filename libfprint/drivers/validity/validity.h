@@ -334,6 +334,7 @@ struct _FpiDeviceValidity
   gboolean    moh_need_lift;    /* a capture happened; the finger must leave first */
   gboolean    moh_told_lift;    /* "remove finger" already reported for this wait */
   gsize       moh_frame_len;
+  guint       moh_capture_resets;
 
   /* Verify/identify: the user record the chip's match named, read back to
    * tell which enrolled print matched */
