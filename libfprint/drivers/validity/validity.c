@@ -40,6 +40,7 @@ static const FpIdEntry id_table[] = {
   { .vid = 0x06CB, .pid = 0x00CB, .driver_data = VALIDITY_DEV_CB },
   { .vid = 0x06CB, .pid = 0x00B7, .driver_data = VALIDITY_DEV_B7 },
   { .vid = 0x06CB, .pid = 0x00D2, .driver_data = VALIDITY_DEV_D2 },
+  { .vid = 0x06CB, .pid = 0x00A2, .driver_data = VALIDITY_DEV_A2 },
   { .vid = 0,      .pid = 0,      .driver_data = 0 },
 };
 

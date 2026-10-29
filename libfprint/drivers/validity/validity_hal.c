@@ -120,6 +120,13 @@ static const ValidityDeviceDesc device_table[] = {
     .pid = 0x00d2,
     .flash_layout = &flash_layout_standard,
   },
+
+  /* Match-on-host: same 0x199 silicon and flash layout as 009a. */
+  [VALIDITY_HAL_DEV_A2] = {
+    .vid = 0x06cb,
+    .pid = 0x00a2,
+    .flash_layout = &flash_layout_standard,
+  },
 };
 
 /* ================================================================

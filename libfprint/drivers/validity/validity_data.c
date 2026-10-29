@@ -37,12 +37,23 @@
  * keep the store and accessor unchanged.
  */
 
-/* Search paths for data files */
+/* Search paths for data files. The first slot is replaced by
+ * $VALIDITY_DATA_DIR when set (development: test without installing). */
 const gchar *validity_data_search_paths[] = {
+  "/usr/share/libfprint/validity",
   "/usr/share/libfprint/validity",
   "/usr/local/share/libfprint/validity",
   NULL,
 };
+
+static void
+apply_data_dir_override (void)
+{
+  const gchar *dir = g_getenv ("VALIDITY_DATA_DIR");
+
+  if (dir != NULL && *dir != '\0')
+    validity_data_search_paths[0] = dir;
+}
 
 /* HMAC-SHA256 key for integrity verification.
  * This is NOT secret — it is also compiled into the data package generator.
@@ -110,6 +121,7 @@ verify_hmac (const guint8 *data,
 static gchar *
 format_search_paths (const gchar *subdir)
 {
+  apply_data_dir_override ();
   GString *str = g_string_new (NULL);
 
   for (const gchar **base = validity_data_search_paths; *base != NULL; base++)
@@ -191,6 +203,7 @@ validity_data_load_device (ValidityDataStore *store,
                            guint16            pid,
                            GError           **error)
 {
+  apply_data_dir_override ();
   g_autofree gchar *subdir = g_strdup_printf ("%04x_%04x", vid, pid);
   g_autofree gchar *found_dir = NULL;
 
@@ -254,6 +267,7 @@ gboolean
 validity_data_load_common (ValidityDataStore *store,
                            GError           **error)
 {
+  apply_data_dir_override ();
   g_return_val_if_fail (store != NULL, FALSE);
 
   for (gsize i = 0; i < G_N_ELEMENTS (common_file_map); i++)
