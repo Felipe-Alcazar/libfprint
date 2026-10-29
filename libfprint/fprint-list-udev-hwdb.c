@@ -82,7 +82,6 @@ static const FpIdEntry allowlist_id_table[] = {
   { .vid = 0x06cb, .pid = 0x008a },
   { .vid = 0x06cb, .pid = 0x009b },
   { .vid = 0x06cb, .pid = 0x00a1 },
-  { .vid = 0x06cb, .pid = 0x00a2 },
   { .vid = 0x06cb, .pid = 0x00a8 },
   { .vid = 0x06cb, .pid = 0x00bb },
   { .vid = 0x06cb, .pid = 0x00bc },
