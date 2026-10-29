@@ -39,6 +39,7 @@
 #include "validity_pack.h"
 #include "fpi-print.h"
 #include "validity.h"
+#include "validity_moh.h"
 #include "vcsfw_protocol.h"
 
 /* Upper bound on frame retries (0x0526 rejections and captures the sensor
@@ -1575,6 +1576,12 @@ validity_enroll (FpDevice *device)
   if (self->emulation_prints)
     {
       emulation_enroll (device);
+      return;
+    }
+
+  if (validity_moh_is_moh (self))
+    {
+      validity_moh_enroll (device);
       return;
     }
 

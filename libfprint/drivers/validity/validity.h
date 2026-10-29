@@ -192,6 +192,9 @@ typedef enum {
 typedef enum {
   VERIFY_LED_ON = 0,
   VERIFY_LED_ON_RECV,
+  VERIFY_LIFT_CHECK,           /* match-on-host: wait until the last finger left */
+  VERIFY_LIFT_CHECK_RECV,
+  VERIFY_LIFT_CHECK_READ,
   VERIFY_BUILD_CAPTURE,
   VERIFY_CAPTURE_SEND,
   VERIFY_CAPTURE_RECV,
@@ -322,6 +325,16 @@ struct _FpiDeviceValidity
   /* Verify/identify mode flag: TRUE = identify, FALSE = verify */
   gboolean identify_mode;
 
+  /* Match-on-host (06cb:00a2): image being downloaded, and the views
+   * collected so far while enrolling (see validity_moh.c) */
+  GByteArray *moh_img;
+  guint       moh_w, moh_h;
+  gboolean    moh_enroll;
+  GPtrArray  *moh_views;
+  gboolean    moh_need_lift;    /* a capture happened; the finger must leave first */
+  gboolean    moh_told_lift;    /* "remove finger" already reported for this wait */
+  gsize       moh_frame_len;
+
   /* Verify/identify: the user record the chip's match named, read back to
    * tell which enrolled print matched */
   ValidityUser verify_match_user;
@@ -444,6 +457,8 @@ GError *validity_map_removed_error (GError *error);
 
 void validity_verify (FpDevice *device);
 void validity_identify (FpDevice *device);
+/* One capture run of the verify state machine, ending in validity_moh_* */
+void validity_verify_run_capture (FpDevice *device);
 void validity_list (FpDevice *device);
 void validity_delete (FpDevice *device);
 void validity_clear_storage (FpDevice *device);

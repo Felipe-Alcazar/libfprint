@@ -152,6 +152,8 @@ driver_sources = {
         'drivers/validity/validity_hal.c',
         'drivers/validity/validity_pair.c',
         'drivers/validity/validity_data.c',
+        'drivers/validity/validity_fpmatch.c',
+        'drivers/validity/validity_moh.c',
     ),
 }
 

@@ -23,6 +23,7 @@
 #include "drivers_api.h"
 #include "validity_pack.h"
 #include "validity.h"
+#include "validity_moh.h"
 #include "validity_data.h"
 #include "validity_fwext.h"
 #include "validity_pair.h"
@@ -119,6 +120,18 @@ dev_probe (FpDevice *device)
   G_DEBUG_HERE ();
 
   self->dev_type = fpi_device_get_driver_data (device);
+
+  if (validity_moh_is_moh (self))
+    {
+      /* Match-on-host: prints live with fprintd, not on the chip. */
+      fpi_device_update_features (device,
+                                  FP_DEVICE_FEATURE_STORAGE |
+                                  FP_DEVICE_FEATURE_STORAGE_LIST |
+                                  FP_DEVICE_FEATURE_STORAGE_DELETE |
+                                  FP_DEVICE_FEATURE_STORAGE_CLEAR,
+                                  0);
+      fpi_device_set_nr_enroll_stages (device, VALIDITY_MOH_ENROLL_STAGES);
+    }
 
   usb_dev = fpi_device_get_usb_device (device);
 
@@ -1649,6 +1662,9 @@ validity_release_state (FpiDeviceValidity *self)
   g_clear_pointer (&self->enroll_template, g_free);
   self->enroll_template_len = 0;
   g_clear_pointer (&self->bulk_data, g_free);
+  g_clear_pointer (&self->moh_img, g_byte_array_unref);
+  g_clear_pointer (&self->moh_views, g_ptr_array_unref);
+  self->moh_enroll = FALSE;
   self->bulk_data_len = 0;
   validity_user_storage_clear (&self->list_storage);
   validity_user_clear (&self->verify_match_user);

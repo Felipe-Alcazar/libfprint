@@ -48,6 +48,7 @@
 #include "validity_pack.h"
 #include "fpi-print.h"
 #include "validity.h"
+#include "validity_moh.h"
 #include "vcsfw_protocol.h"
 
 /* ================================================================
@@ -635,6 +636,26 @@ verify_get_match_user_recv (FpiSsm            *ssm,
   fpi_ssm_next_state (ssm);
 }
 
+/* Lift check: raw frame read from EP 0x82 */
+static void
+lift_frame_read_cb (FpiUsbTransfer *transfer,
+                    FpDevice       *dev,
+                    gpointer        user_data,
+                    GError         *error)
+{
+  FpiDeviceValidity *self = FPI_DEVICE_VALIDITY (dev);
+
+  if (error)
+    {
+      fpi_ssm_mark_failed (transfer->ssm, error);
+      return;
+    }
+  g_clear_pointer (&self->bulk_data, g_free);
+  self->bulk_data = g_memdup2 (transfer->buffer, transfer->actual_length);
+  self->bulk_data_len = transfer->actual_length;
+  fpi_ssm_next_state (transfer->ssm);
+}
+
 static void
 verify_run_state (FpiSsm   *ssm,
                   FpDevice *dev)
@@ -649,6 +670,24 @@ verify_run_state (FpiSsm   *ssm,
       /* The match decision must come from this attempt's get_match_result
        * alone; drop anything an earlier action left behind. */
       validity_verify_clear_match_state (self);
+      if (validity_moh_is_moh (self))
+        {
+          validity_moh_image_reset (self);
+          /* Capture with the calibration the print was enrolled with. */
+          if (!self->moh_enroll)
+            {
+              FpPrint *print = NULL;
+              GPtrArray *gallery = NULL;
+
+              if (self->identify_mode)
+                fpi_device_get_identify_data (FP_DEVICE (self), &gallery);
+              else
+                fpi_device_get_verify_data (FP_DEVICE (self), &print);
+              if (gallery && gallery->len > 0)
+                print = g_ptr_array_index (gallery, 0);
+              validity_moh_apply_calibration (self, print);
+            }
+        }
       {
         gsize cmd_len;
         const guint8 *cmd = validity_capture_glow_start_cmd (&cmd_len);
@@ -657,6 +696,59 @@ verify_run_state (FpiSsm   *ssm,
       break;
 
     case VERIFY_LED_ON_RECV:
+      fpi_ssm_next_state (ssm);
+      break;
+
+    case VERIFY_LIFT_CHECK:
+      if (!validity_moh_is_moh (self) || !self->moh_need_lift)
+        {
+          fpi_ssm_jump_to_state (ssm, VERIFY_BUILD_CAPTURE);
+          break;
+        }
+      {
+        gsize cmd_len, frame_len;
+        g_autofree guint8 *cmd = validity_moh_frame_cmd (self, &cmd_len, &frame_len);
+
+        if (!cmd)
+          {
+            fpi_ssm_jump_to_state (ssm, VERIFY_BUILD_CAPTURE);
+            break;
+          }
+        self->moh_frame_len = frame_len;
+        vcsfw_tls_cmd_send (self, ssm, cmd, cmd_len, NULL);
+      }
+      break;
+
+    case VERIFY_LIFT_CHECK_RECV:
+      if (self->cmd_response_status != VCSFW_STATUS_OK)
+        {
+          /* No frame to judge by: fall back to capturing. */
+          fpi_ssm_jump_to_state (ssm, VERIFY_BUILD_CAPTURE);
+          break;
+        }
+      {
+        FpiUsbTransfer *xfer = fpi_usb_transfer_new (FP_DEVICE (self));
+
+        xfer->ssm = ssm;
+        fpi_usb_transfer_fill_bulk (xfer, VALIDITY_EP_DATA_IN, self->moh_frame_len);
+        fpi_usb_transfer_submit (xfer, 2000, NULL, lift_frame_read_cb, NULL);
+      }
+      break;
+
+    case VERIFY_LIFT_CHECK_READ:
+      if (validity_moh_frame_has_finger (self, self->bulk_data, self->bulk_data_len))
+        {
+          if (!self->moh_told_lift && self->moh_enroll)
+            fpi_device_enroll_progress (FP_DEVICE (self), self->moh_views->len, NULL,
+                                        fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
+          self->moh_told_lift = TRUE;
+          fpi_ssm_jump_to_state_delayed (ssm, VERIFY_LIFT_CHECK, 100);
+          break;
+        }
+      self->moh_need_lift = FALSE;
+      self->moh_told_lift = FALSE;
+      g_clear_pointer (&self->bulk_data, g_free);
+      self->bulk_data_len = 0;
       fpi_ssm_next_state (ssm);
       break;
 
@@ -688,6 +780,26 @@ verify_run_state (FpiSsm   *ssm,
       break;
 
     case VERIFY_GET_PRG_STATUS_RECV:
+      if (validity_moh_is_moh (self))
+        {
+          /* Match-on-host: the response is the image, sent in chunks. */
+          gint r = validity_moh_image_add (self, self->cmd_response_status,
+                                           self->cmd_response_data,
+                                           self->cmd_response_len);
+          if (r == 0)
+            {
+              fpi_ssm_jump_to_state (ssm, VERIFY_GET_PRG_STATUS);
+              break;
+            }
+          if (r < 0)
+            {
+              fp_dbg ("No image in this capture -- re-arming");
+              validity_moh_image_reset (self);
+              self->verify_recapture = TRUE;
+            }
+          fpi_ssm_next_state (ssm);
+          break;
+        }
       /* Capture status: len(4) | x(2) | y(2) | w1(2) | w2(2) | error(4).
        * A real finger reports non-zero geometry and error==0. An empty
        * "phantom" capture (no finger on the sensor) reports x=0/y=0 and a
@@ -743,6 +855,11 @@ verify_run_state (FpiSsm   *ssm,
         {
           self->verify_recapture = FALSE;
           fpi_ssm_jump_to_state_delayed (ssm, VERIFY_BUILD_CAPTURE, 300);
+        }
+      else if (validity_moh_is_moh (self))
+        {
+          /* The host matches: skip the on-chip match. */
+          fpi_ssm_jump_to_state (ssm, VERIFY_LED_OFF);
         }
       else
         {
@@ -862,6 +979,16 @@ verify_ssm_done (FpiSsm   *ssm,
                  GError   *error)
 {
   FpiDeviceValidity *self = FPI_DEVICE_VALIDITY (dev);
+
+  if (validity_moh_is_moh (self))
+    {
+      validity_verify_clear_match_state (self);
+      if (error)
+        validity_moh_capture_failed (dev, validity_map_removed_error (error));
+      else
+        validity_moh_capture_done (dev);
+      return;
+    }
 
   if (error)
     {
@@ -1882,4 +2009,12 @@ validity_clear_storage (FpDevice *device)
 
   ssm = fpi_ssm_new (device, clear_run_state, CLEAR_NUM_STATES);
   fpi_ssm_start (ssm, clear_ssm_done);
+}
+
+void
+validity_verify_run_capture (FpDevice *device)
+{
+  FpiSsm *ssm = fpi_ssm_new (device, verify_run_state, VERIFY_NUM_STATES);
+
+  fpi_ssm_start (ssm, verify_ssm_done);
 }
